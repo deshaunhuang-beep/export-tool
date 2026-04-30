@@ -8,7 +8,7 @@ import traceback
 import json
 
 CONFIG_FILE = "config.json"
-VERSION = "4.0.0"
+VERSION = "4.1.0-Performance"
 
 def safe_date_format(dt_obj):
     """安全地转换日期，如果为空则返回空字符串"""
@@ -36,7 +36,6 @@ def load_or_ask_config():
 
     print("\n--- 基础配置 ---")
 
-    # MongoDB URI
     if not config["mongo_uri"]:
         while not config["mongo_uri"]:
             config["mongo_uri"] = input("请输入 MongoDB 连接地址: ").strip()
@@ -44,7 +43,6 @@ def load_or_ask_config():
         mongo_in = input("MongoDB 地址 (回车保持现状): ").strip()
         if mongo_in: config["mongo_uri"] = mongo_in
 
-    # Database Name
     if not config["db_name"]:
         while not config["db_name"]:
             config["db_name"] = input("请输入数据库名称: ").strip()
@@ -52,7 +50,6 @@ def load_or_ask_config():
         db_in = input(f"数据库名称 [{config['db_name']}] (回车保持现状): ").strip()
         if db_in: config["db_name"] = db_in
 
-    # AppID
     if not config["app_id"]:
         while not config["app_id"]:
             app_in = input("请输入业务 AppID (必须为数字): ").strip()
@@ -95,7 +92,8 @@ def run_report_1_chongti(db, config, start_utc, end_utc, date_str):
 
     uids = [res['_id']['user'] for res in order_results]
     print(f"[2/4] 同步 {len(uids)} 个用户...")
-    user_map = {u['_id']: u for u in db["users"].find({"_id": {"$in": uids}})}
+    # 性能优化: Projection 只返回需要的字段
+    user_map = {u['_id']: u for u in db["users"].find({"_id": {"$in": uids}}, {"uid": 1, "meta.adChannel": 1, "createdAt": 1})}
     
     daily_pipeline = [
         {"$match": {"user": {"$in": uids}, "startAt": {"$gte": start_utc, "$lt": end_utc}}},
@@ -107,17 +105,22 @@ def run_report_1_chongti(db, config, start_utc, end_utc, date_str):
     with open(output_file, 'w', newline='', encoding='utf-8-sig') as f:
         writer = csv.writer(f)
         writer.writerow(["用户ID", "用户渠道", "注册日期", "是否模拟回调", "区间内存款金额", "区间内提款金额", "区间内存款次数", "区间内获得真金奖励", "区间内投注金额"])
+        
+        # 性能优化: 批量准备数据，一次性写入
+        rows_to_write = []
         for doc in order_results:
             u_id = doc['_id']['user']
             u = user_map.get(u_id, {})
             d = daily_map.get(u_id, {})
-            writer.writerow([
+            rows_to_write.append([
                 u.get('uid', ''), "广告" if u.get('meta', {}).get('adChannel') else "自然裂变",
                 safe_date_format(u.get('createdAt')),
                 "是" if doc.get('firstStatus') == 'MockCompleted' else "否",
                 doc.get('存款金额', 0), doc.get('提款金额', 0), doc.get('存款次数', 0),
                 d.get('rewardCash', 0), d.get('betAmount', 0)
             ])
+        writer.writerows(rows_to_write)
+        
     print(f"✅ 完成: {os.path.abspath(output_file)}")
 
 def run_report_2_shoucun(db, config, start_utc, end_utc, date_str):
@@ -134,10 +137,11 @@ def run_report_2_shoucun(db, config, start_utc, end_utc, date_str):
     uids = [res['_id'] for res in pay_results]
     
     print(f"[2/4] 正在筛选在这几天内产生首次充值的用户...")
+    # 性能优化: 增加索引命中率，只查询必须字段
     shoucun_users = {u['_id']: u for u in db["users"].find({
         "_id": {"$in": uids},
         "meta.firstRechargeAt": {"$gte": start_utc, "$lt": end_utc}
-    })}
+    }, {"uid": 1, "meta.adChannel": 1, "meta.firstRechargeAt": 1, "createdAt": 1})}
     
     sc_uids = list(shoucun_users.keys())
     if not sc_uids:
@@ -158,15 +162,19 @@ def run_report_2_shoucun(db, config, start_utc, end_utc, date_str):
 
     print(f"[4/4] 导出报表...")
     headers = ["用户渠道", "用户ID", "注册日期", "首次充值日期", "区间内存款次数", "第一笔充值金额", "区间内总充值金额", "区间内提款金额", "区间内获得真金奖励", "区间内投注金额"]
+    
     with open(output_file, 'w', newline='', encoding='utf-8-sig') as f:
         writer = csv.writer(f)
         writer.writerow(headers)
+        
+        # 性能优化: 批量写入
+        rows_to_write = []
         for res in pay_results:
             uid = res['_id']
             if uid not in shoucun_users: continue
             u = shoucun_users[uid]
             d = daily_map.get(uid, {})
-            writer.writerow([
+            rows_to_write.append([
                 "广告" if u.get('meta', {}).get('adChannel') else "自然裂变",
                 u.get('uid', ''),
                 safe_date_format(u.get('createdAt')),
@@ -174,6 +182,8 @@ def run_report_2_shoucun(db, config, start_utc, end_utc, date_str):
                 res.get('次数', 0), res.get('第一笔', 0), res.get('总额', 0),
                 wd_map.get(uid, 0), d.get('rewardCash', 0), d.get('betAmount', 0)
             ])
+        writer.writerows(rows_to_write)
+        
     print(f"✅ 完成: {os.path.abspath(output_file)}")
 
 def run_report_3_sms_recall(db, config, start_utc, end_utc, date_str):
@@ -252,30 +262,31 @@ def run_report_4_unrecharged_users(db, config, end_utc, end_date_str):
     output_file = f"注册未充值用户_{config['db_name']}_{end_date_str}.csv"
     print(f"\n[1/2] 正在筛选注册未充值用户 (截止到 {end_date_str} 23:59:59)...")
 
-    pipeline = [
-        {
-            "$match": {
-                "role": {"$ne": "gm"},
-                "rechargeCount": 0,
-                "updatedAt": {"$lt": end_utc} 
-            }
-        },
-        {
-            "$project": {
-                "_id": 0,
-                "uid": 1,
-                "phone": 1,
-                "email": 1,
-                "updatedAt": 1
-            }
-        }
-    ]
+    # 性能优化: 移除不必要的 $project 阶段，直接在 $match 中进行游标返回，并控制返回字段
+    query = {
+        "role": {"$ne": "gm"},
+        "rechargeCount": 0,
+        "updatedAt": {"$lt": end_utc}
+    }
+    
+    projection = {
+        "_id": 0,
+        "uid": 1,
+        "phone": 1,
+        "email": 1,
+        "updatedAt": 1
+    }
 
-    print(f"  执行数据库检索，数据量较大时可能需要几十秒，请稍候...")
-    cursor = db["users"].aggregate(pipeline, allowDiskUse=True)
+    print(f"  执行数据库检索 (分批拉取数据)，请稍候...")
+    
+    # 性能优化: 使用 find 代替 aggregate，并设置 batch_size，防止 Cursor 超时
+    cursor = db["users"].find(query, projection, batch_size=5000)
 
     print(f"[2/2] 正在生成导出文件...")
     count = 0
+    batch_data = []
+    batch_size = 10000 # 每 10000 条数据进行一次 I/O 写入
+
     with open(output_file, 'w', newline='', encoding='utf-8-sig') as f:
         writer = csv.writer(f)
         writer.writerow(["用户ID", "手机号", "邮箱", "最后活跃时间(东八区)"])
@@ -283,15 +294,24 @@ def run_report_4_unrecharged_users(db, config, end_utc, end_date_str):
         for doc in cursor:
             phone = doc.get('phone', '') or ''
             email = doc.get('email', '') or ''
-            writer.writerow([
+            
+            batch_data.append([
                 doc.get('uid', ''),
                 phone,
                 email,
                 safe_date_format(doc.get('updatedAt'))
             ])
             count += 1
-            if count > 0 and count % 50000 == 0:
-                print(f"  已导出 {count} 条用户数据...")
+            
+            # 性能优化: 达到 batch_size 后再一次性写入磁盘
+            if count % batch_size == 0:
+                writer.writerows(batch_data)
+                batch_data = [] # 清空缓存区
+                print(f"  已处理并导出 {count} 条用户数据...")
+
+        # 写入最后剩余的数据
+        if batch_data:
+            writer.writerows(batch_data)
 
     print(f"✅ 导出成功！共计 {count} 名注册未充值用户。")
     print(f"文件位置: {os.path.abspath(output_file)}")
@@ -375,7 +395,6 @@ def main():
         else: 
             print("❌ 无效选择")
 
-    # 精细化异常捕捉
     except pymongo.errors.ServerSelectionTimeoutError:
         print("\n❌ MongoDB 连接失败 (连接超时)")
         print("请检查：")
