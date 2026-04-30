@@ -278,7 +278,6 @@ def run_report_5_custom_users(db, config, end_utc, end_date_str):
     bal_min, bal_max = filters.get("cash", [0, 5])
 
     # 2. 计算离线时间边界 (注意：因为 end_utc 已经是查询结束的第二天0点，天数换算需直接减)
-    # 例如：距离现在 > 3天，说明最后登录时间必须 小于等于 (今天 - 3天)
     max_login_time = end_utc - timedelta(days=off_min)
     min_login_time = end_utc - timedelta(days=off_max)
 
@@ -314,9 +313,8 @@ def run_report_5_custom_users(db, config, end_utc, end_date_str):
         writer = csv.writer(f)
         writer.writerow(["uid", "手机号", "最后登陆时间(东八区)", "邮箱", "充值总金额", "KYC手机号"])
 
-        # 封装的写入函数 (实现高性能匹配 wallets 表)
+        # 封装的写入函数
         def process_and_write_batch(users, uids):
-            # 批量去 wallets 表中拉取 kyc 信息
             wallets = db["wallets"].find({"user": {"$in": uids}}, {"user": 1, "banks": 1})
             kyc_map = {}
             for w in wallets:
@@ -324,7 +322,6 @@ def run_report_5_custom_users(db, config, end_utc, end_date_str):
                 if banks and isinstance(banks, list) and len(banks) > 0:
                     kyc_map[w["user"]] = banks[0].get("phone", "")
 
-            # 组装数据并写入 CSV
             rows = []
             for u in users:
                 raw_phone = u.get('phone', '') or ''
@@ -349,14 +346,12 @@ def run_report_5_custom_users(db, config, end_utc, end_date_str):
             user_ids_cache.append(doc['_id'])
             count += 1
             
-            # 每满 5000 条，执行一次跨表匹配和写入，不占用过多内存
             if len(docs_cache) >= batch_size:
                 process_and_write_batch(docs_cache, user_ids_cache)
                 docs_cache.clear()
                 user_ids_cache.clear()
                 print(f"  已处理并导出 {count} 条精准用户数据...")
 
-        # 处理最后不足一整批的数据
         if docs_cache:
             process_and_write_batch(docs_cache, user_ids_cache)
 
@@ -417,4 +412,19 @@ def main():
         db = client[config['db_name']]
         print("✅ MongoDB 连接成功")
 
-        if choice == '1': run_report_1_chongti(db, config
+        if choice == '1': run_report_1_chongti(db, config, start_utc, end_utc, date_str)
+        elif choice == '2': run_report_2_shoucun(db, config, start_utc, end_utc, date_str)
+        elif choice == '3': run_report_3_sms_recall(db, config, start_utc, end_utc, date_str)
+        elif choice == '4': run_report_4_unrecharged_users(db, config, end_utc, end_date.strftime('%Y-%m-%d'))
+        elif choice == '5': run_report_5_custom_users(db, config, end_utc, end_date.strftime('%Y-%m-%d'))
+        else: print("❌ 无效选择")
+
+    except Exception as e:
+        print("\n❌ 程序运行发生未知错误")
+        traceback.print_exc()
+    finally:
+        print("\n" + "=" * 50)
+        input("程序已结束，按 [回车键] 关闭窗口...")
+
+if __name__ == "__main__":
+    main()
