@@ -7,14 +7,14 @@ import os
 import traceback
 import json
 
-# 新增：用于处理 .xlsx 文件
+# 用于处理 .xlsx 文件
 try:
     import openpyxl
 except ImportError:
     pass # 留给后续逻辑中优雅地报错
 
 CONFIG_FILE = "config.json"
-VERSION = "4.2.1-Performance-UID"
+VERSION = "5.1.0-Ultimate"
 
 def safe_date_format(dt_obj):
     """安全地转换日期，如果为空则返回空字符串"""
@@ -188,6 +188,7 @@ def run_report_2_shoucun(db, config, start_utc, end_utc, date_str):
         
     print(f"✅ 完成: {os.path.abspath(output_file)}")
 
+
 def run_report_3_sms_recall(db, config, start_utc, end_utc, date_str):
     print(f"\n--- [书生计算 SMS 召回情况 ({date_str})] ---")
     file_name = input("请输入文件名 (支持 .csv 或 .xlsx，例如 target_users.xlsx): ").strip()
@@ -329,7 +330,10 @@ def run_report_4_unrecharged_users(db, config, end_utc, end_date_str):
         writer.writerow(["uid", "手机号", "邮箱", "最后活跃时间(东八区)"])
 
         for doc in cursor:
-            phone = doc.get('phone', '') or ''
+            # 💡 核心修复：添加制表符 \t 强制转为文本，防止 Excel 自动公式化计算
+            raw_phone = doc.get('phone', '') or ''
+            phone = f"\t{raw_phone}" if raw_phone else ""
+            
             email = doc.get('email', '') or ''
             
             batch_data.append([
