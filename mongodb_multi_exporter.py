@@ -104,7 +104,7 @@ def run_report_1_chongti(db, config, start_utc, end_utc, date_str):
     print(f"[3/4] 写入文件...")
     with open(output_file, 'w', newline='', encoding='utf-8-sig') as f:
         writer = csv.writer(f)
-        writer.writerow(["用户ID", "用户渠道", "注册日期", "是否模拟回调", "区间内存款金额", "区间内提款金额", "区间内存款次数", "区间内获得真金奖励", "区间内投注金额"])
+        writer.writerow(["uid", "用户渠道", "注册日期", "是否模拟回调", "区间内存款金额", "区间内提款金额", "区间内存款次数", "区间内获得真金奖励", "区间内投注金额"])
         
         # 性能优化: 批量准备数据，一次性写入
         rows_to_write = []
@@ -161,7 +161,7 @@ def run_report_2_shoucun(db, config, start_utc, end_utc, date_str):
     daily_map = {res['_id']: res for res in db["transactiondailies"].aggregate(daily_pipeline)}
 
     print(f"[4/4] 导出报表...")
-    headers = ["用户渠道", "用户ID", "注册日期", "首次充值日期", "区间内存款次数", "第一笔充值金额", "区间内总充值金额", "区间内提款金额", "区间内获得真金奖励", "区间内投注金额"]
+    headers = ["用户渠道", "uid", "注册日期", "首次充值日期", "区间内存款次数", "第一笔充值金额", "区间内总充值金额", "区间内提款金额", "区间内获得真金奖励", "区间内投注金额"]
     
     with open(output_file, 'w', newline='', encoding='utf-8-sig') as f:
         writer = csv.writer(f)
@@ -289,7 +289,7 @@ def run_report_4_unrecharged_users(db, config, end_utc, end_date_str):
 
     with open(output_file, 'w', newline='', encoding='utf-8-sig') as f:
         writer = csv.writer(f)
-        writer.writerow(["用户ID", "手机号", "邮箱", "最后活跃时间(东八区)"])
+        writer.writerow(["uid", "手机号", "邮箱", "最后活跃时间(东八区)"])
 
         for doc in cursor:
             phone = doc.get('phone', '') or ''
