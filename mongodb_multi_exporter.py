@@ -7,8 +7,14 @@ import os
 import traceback
 import json
 
+# 新增：用于处理 .xlsx 文件
+try:
+    import openpyxl
+except ImportError:
+    pass # 留给后续逻辑中优雅地报错
+
 CONFIG_FILE = "config.json"
-VERSION = "4.1.0-Performance"
+VERSION = "4.2.1-Performance-UID"
 
 def safe_date_format(dt_obj):
     """安全地转换日期，如果为空则返回空字符串"""
@@ -92,7 +98,6 @@ def run_report_1_chongti(db, config, start_utc, end_utc, date_str):
 
     uids = [res['_id']['user'] for res in order_results]
     print(f"[2/4] 同步 {len(uids)} 个用户...")
-    # 性能优化: Projection 只返回需要的字段
     user_map = {u['_id']: u for u in db["users"].find({"_id": {"$in": uids}}, {"uid": 1, "meta.adChannel": 1, "createdAt": 1})}
     
     daily_pipeline = [
@@ -106,7 +111,6 @@ def run_report_1_chongti(db, config, start_utc, end_utc, date_str):
         writer = csv.writer(f)
         writer.writerow(["uid", "用户渠道", "注册日期", "是否模拟回调", "区间内存款金额", "区间内提款金额", "区间内存款次数", "区间内获得真金奖励", "区间内投注金额"])
         
-        # 性能优化: 批量准备数据，一次性写入
         rows_to_write = []
         for doc in order_results:
             u_id = doc['_id']['user']
@@ -137,7 +141,6 @@ def run_report_2_shoucun(db, config, start_utc, end_utc, date_str):
     uids = [res['_id'] for res in pay_results]
     
     print(f"[2/4] 正在筛选在这几天内产生首次充值的用户...")
-    # 性能优化: 增加索引命中率，只查询必须字段
     shoucun_users = {u['_id']: u for u in db["users"].find({
         "_id": {"$in": uids},
         "meta.firstRechargeAt": {"$gte": start_utc, "$lt": end_utc}
@@ -167,7 +170,6 @@ def run_report_2_shoucun(db, config, start_utc, end_utc, date_str):
         writer = csv.writer(f)
         writer.writerow(headers)
         
-        # 性能优化: 批量写入
         rows_to_write = []
         for res in pay_results:
             uid = res['_id']
@@ -188,32 +190,69 @@ def run_report_2_shoucun(db, config, start_utc, end_utc, date_str):
 
 def run_report_3_sms_recall(db, config, start_utc, end_utc, date_str):
     print(f"\n--- [书生计算 SMS 召回情况 ({date_str})] ---")
-    csv_file = input("请输入包含 UID 的 CSV 文件名 (例如 target_users.csv): ").strip()
+    file_name = input("请输入文件名 (支持 .csv 或 .xlsx，例如 target_users.xlsx): ").strip()
     
-    if not os.path.exists(csv_file):
-        print(f"❌ 找不到文件: {csv_file}，请确保它和本程序在同一个文件夹！")
+    if not os.path.exists(file_name):
+        print(f"❌ 找不到文件: {file_name}，请确保它和本程序在同一个文件夹！")
         return
 
     target_uids = []
+    ext = os.path.splitext(file_name)[1].lower()
+
     try:
-        with open(csv_file, 'r', encoding='utf-8-sig') as f:
-            reader = csv.DictReader(f)
-            if 'uid' not in reader.fieldnames:
-                print("❌ CSV 文件的表头里没有找到 'uid'！请检查。")
+        if ext == '.csv':
+            with open(file_name, 'r', encoding='utf-8-sig') as f:
+                reader = csv.DictReader(f)
+                uid_key = next((k for k in reader.fieldnames if str(k).strip().lower() == 'uid'), None)
+                if not uid_key:
+                    print("❌ CSV 文件的表头里没有找到 'uid' 或 'UID'！请检查。")
+                    return
+                for row in reader:
+                    val = str(row[uid_key]).strip()
+                    if val.isdigit():
+                        target_uids.append(int(val))
+
+        elif ext == '.xlsx':
+            if 'openpyxl' not in sys.modules:
+                print("❌ 缺少 openpyxl 库。请在 GitHub Actions 中配置 pip install openpyxl")
                 return
-            for row in reader:
-                val = row['uid'].strip()
-                if val.isdigit():
-                    target_uids.append(int(val))
+            
+            print(f"📄 正在解析 Excel 文件...")
+            wb = openpyxl.load_workbook(file_name, data_only=True)
+            sheet = wb.active
+
+            uid_col_idx = None
+            for col_idx, cell in enumerate(sheet[1], start=1):
+                if cell.value and str(cell.value).strip().lower() == 'uid':
+                    uid_col_idx = col_idx
+                    break
+            
+            if not uid_col_idx:
+                print("❌ Excel 文件的【第一行】表头里没有找到 'uid' 或 'UID' 列！请检查。")
+                return
+
+            for row_idx in range(2, sheet.max_row + 1):
+                val = sheet.cell(row=row_idx, column=uid_col_idx).value
+                if val is not None:
+                    val_str = str(val).strip()
+                    if val_str.isdigit():
+                        target_uids.append(int(val_str))
+        else:
+            print(f"❌ 不支持的文件格式: {ext}，仅支持 .csv 或 .xlsx")
+            return
+
     except Exception as e:
-        print(f"❌ 读取 CSV 失败: {e}")
+        print(f"❌ 读取文件失败: {e}")
+        traceback.print_exc()
         return
 
+    target_uids = list(set(target_uids))
+
     if not target_uids:
-        print("⚠️ CSV 里没有解析到任何有效的 UID。")
+        print("⚠️ 文件里没有解析到任何有效的 UID。")
         return
         
-    print(f"✅ 成功从 CSV 载入 {len(target_uids)} 个 UID。")
+    print(f"✅ 成功从 {ext.upper()} 载入 {len(target_uids)} 个有效 UID。")
     print("正在数据库中执行匹配分析，请稍候...")
 
     pipeline = [
@@ -255,14 +294,13 @@ def run_report_3_sms_recall(db, config, start_utc, end_utc, date_str):
         print(f"🔹 区间充值用户: {recharge:,} 人")
         print(f"🔹 充值转化率  : {rate:.2%} ({rate})")
     else:
-        print("⚠️ 没有查询到结果 (可能 CSV 中的 UID 在库中不存在)")
+        print("⚠️ 没有查询到结果 (可能文件中的 UID 在库中均不存在)")
     print("🌟"*20)
 
 def run_report_4_unrecharged_users(db, config, end_utc, end_date_str):
     output_file = f"注册未充值用户_{config['db_name']}_{end_date_str}.csv"
     print(f"\n[1/2] 正在筛选注册未充值用户 (截止到 {end_date_str} 23:59:59)...")
 
-    # 性能优化: 移除不必要的 $project 阶段，直接在 $match 中进行游标返回，并控制返回字段
     query = {
         "role": {"$ne": "gm"},
         "rechargeCount": 0,
@@ -279,13 +317,12 @@ def run_report_4_unrecharged_users(db, config, end_utc, end_date_str):
 
     print(f"  执行数据库检索 (分批拉取数据)，请稍候...")
     
-    # 性能优化: 使用 find 代替 aggregate，并设置 batch_size，防止 Cursor 超时
     cursor = db["users"].find(query, projection, batch_size=5000)
 
     print(f"[2/2] 正在生成导出文件...")
     count = 0
     batch_data = []
-    batch_size = 10000 # 每 10000 条数据进行一次 I/O 写入
+    batch_size = 10000
 
     with open(output_file, 'w', newline='', encoding='utf-8-sig') as f:
         writer = csv.writer(f)
@@ -303,13 +340,11 @@ def run_report_4_unrecharged_users(db, config, end_utc, end_date_str):
             ])
             count += 1
             
-            # 性能优化: 达到 batch_size 后再一次性写入磁盘
             if count % batch_size == 0:
                 writer.writerows(batch_data)
-                batch_data = [] # 清空缓存区
+                batch_data = []
                 print(f"  已处理并导出 {count} 条用户数据...")
 
-        # 写入最后剩余的数据
         if batch_data:
             writer.writerows(batch_data)
 
@@ -331,12 +366,11 @@ def main():
         print("\n--- 请选择要执行的功能 ---")
         print("[1] 导出 - 充提数据")
         print("[2] 导出 - 首存订单")
-        print("[3] 打印 - 书生计算SMS召回情况 (需本地CSV)")
+        print("[3] 打印 - 书生计算SMS召回情况 (支持 .csv / .xlsx)")
         print("[4] 导出 - 书生筛选注册未充值用户 (用于拉新/激活短信)")
         
         choice = input(">> ").strip()
 
-        # 日期范围设定
         print("\n--- 日期范围设置 ---")
         start_in = input("请输入起始日期 (YYYY-MM-DD, 回车默认昨天): ").strip()
         
