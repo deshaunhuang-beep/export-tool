@@ -12,8 +12,16 @@ try:
 except ImportError:
     pass
 
-CONFIG_FILE = "config.json"
-VERSION = "6.0.0-CustomFilter"
+VERSION = "6.2.1-FixCash"
+
+def get_base_path():
+    if getattr(sys, 'frozen', False):
+        return os.path.dirname(sys.executable)
+    else:
+        return os.path.dirname(os.path.abspath(__file__))
+
+BASE_DIR = get_base_path()
+CONFIG_FILE = os.path.join(BASE_DIR, "config.json")
 
 def safe_date_format(dt_obj):
     if not dt_obj or not isinstance(dt_obj, datetime):
@@ -24,31 +32,13 @@ def safe_date_format(dt_obj):
         return ""
 
 def load_or_ask_config():
-    # 新增 filter_conditions 默认配置
-    config = {
-        "mongo_uri": "",
-        "db_name": "",
-        "app_id": "",
-        "filter_conditions": {
-            "rechargeCount": [1, 1],       # 充值次数: [最小值, 最大值]
-            "rechargeCash": [100, 999999], # 充值金额: [最小值, 最大值]
-            "offlineDays": [3, 9999],      # 距离上次登陆天数: [最小天数, 最大天数]
-            "cash": [0, 5]                 # 余额: [最小值, 最大值]
-        }
-    }
+    config = {"mongo_uri": "", "db_name": "", "app_id": ""}
 
     if os.path.exists(CONFIG_FILE):
         try:
             with open(CONFIG_FILE, "r", encoding="utf-8") as f:
-                saved_config = json.load(f)
-                config.update(saved_config)
-                # 兼容旧版本配置文件，如果没 filter_conditions 就补上
-                if "filter_conditions" not in saved_config:
-                    config["filter_conditions"] = {
-                        "rechargeCount": [1, 1], "rechargeCash": [100, 999999],
-                        "offlineDays": [3, 9999], "cash": [0, 5]
-                    }
-            print("✅ 已加载本地配置")
+                config.update(json.load(f))
+            print(f"✅ 已加载本地配置 (路径: {CONFIG_FILE})")
         except:
             print("⚠️ 配置文件读取失败，将重新输入")
 
@@ -78,14 +68,13 @@ def load_or_ask_config():
             if app_in.isdigit(): config["app_id"] = int(app_in)
             else: print("❌ AppID 必须是数字，已保留原配置")
 
-    # 自动保存配置（包含过滤条件格式），方便用户去修改
     with open(CONFIG_FILE, "w", encoding="utf-8") as f:
         json.dump(config, f, indent=4, ensure_ascii=False)
 
     return config
 
 def run_report_1_chongti(db, config, start_utc, end_utc, date_str):
-    output_file = f"充提数据_{config['db_name']}_{date_str}.csv"
+    output_file = os.path.join(BASE_DIR, f"充提数据_{config['db_name']}_{date_str}.csv")
     print(f"\n[1/4] 正在拉取基础订单 ({date_str})...")
     
     pipeline = [
@@ -134,7 +123,7 @@ def run_report_1_chongti(db, config, start_utc, end_utc, date_str):
     print(f"✅ 完成: {os.path.abspath(output_file)}")
 
 def run_report_2_shoucun(db, config, start_utc, end_utc, date_str):
-    output_file = f"首存订单_{config['db_name']}_{date_str}.csv"
+    output_file = os.path.join(BASE_DIR, f"首存订单_{config['db_name']}_{date_str}.csv")
     print(f"\n[1/4] 正在统计该时间段所有充值用户 ({date_str})...")
     
     pay_pipeline = [
@@ -191,6 +180,10 @@ def run_report_2_shoucun(db, config, start_utc, end_utc, date_str):
 def run_report_3_sms_recall(db, config, start_utc, end_utc, date_str):
     print(f"\n--- [书生计算 SMS 召回情况 ({date_str})] ---")
     file_name = input("请输入文件名 (支持 .csv 或 .xlsx，例如 target_users.xlsx): ").strip()
+    
+    if not os.path.isabs(file_name):
+        file_name = os.path.join(BASE_DIR, file_name)
+        
     if not os.path.exists(file_name):
         print(f"❌ 找不到文件: {file_name}，请确保它和本程序在同一个文件夹！")
         return
@@ -242,7 +235,7 @@ def run_report_3_sms_recall(db, config, start_utc, end_utc, date_str):
     print("🌟"*20)
 
 def run_report_4_unrecharged_users(db, config, end_utc, end_date_str):
-    output_file = f"注册未充值用户_{config['db_name']}_{end_date_str}.csv"
+    output_file = os.path.join(BASE_DIR, f"注册未充值用户_{config['db_name']}_{end_date_str}.csv")
     print(f"\n[1/2] 正在筛选注册未充值用户 (截止到 {end_date_str} 23:59:59)...")
 
     query = {"role": {"$ne": "gm"}, "rechargeCount": 0, "updatedAt": {"$lt": end_utc}}
@@ -263,32 +256,61 @@ def run_report_4_unrecharged_users(db, config, end_utc, end_date_str):
                 batch_data = []
                 print(f"  已处理 {count} 条...")
         if batch_data: writer.writerows(batch_data)
-    print(f"✅ 导出成功！共计 {count} 名注册未充值用户。文件位置: {os.path.abspath(output_file)}")
+    print(f"✅ 导出成功！共计 {count} 名注册未充值用户。\n文件位置: {os.path.abspath(output_file)}")
 
+def get_int_input(prompt_text, default_val):
+    """辅助函数：处理用户输入，支持默认值和错误回退"""
+    val = input(prompt_text).strip()
+    if not val:
+        return default_val
+    try:
+        return int(val)
+    except ValueError:
+        print(f"   ⚠️ 输入无效，自动使用默认值: {default_val}")
+        return default_val
 
 def run_report_5_custom_users(db, config, end_utc, end_date_str):
-    """逻辑 5: 查询指定条件用户群 (带 KYC 钱包映射)"""
-    output_file = f"圈选用户群_{config['db_name']}_{end_date_str}.csv"
+    output_file = os.path.join(BASE_DIR, f"圈选用户群_{config['db_name']}_{end_date_str}.csv")
     
-    # 1. 抓取配置项
-    filters = config.get("filter_conditions", {})
-    rc_min, rc_max = filters.get("rechargeCount", [1, 1])
-    cash_min, cash_max = filters.get("rechargeCash", [100, 999999])
-    off_min, off_max = filters.get("offlineDays", [3, 9999])
-    bal_min, bal_max = filters.get("cash", [0, 5])
+    print("\n" + "="*40)
+    print(" 🎯 请输入筛选条件 (直接回车将使用默认值)")
+    print("="*40)
 
-    # 2. 计算离线时间边界 (注意：因为 end_utc 已经是查询结束的第二天0点，天数换算需直接减)
+    # 充值次数输入
+    rc_min = get_int_input("▶ 1. 最小充值次数 (默认 1): ", 1)
+    rc_max = get_int_input("▶    最大充值次数 (默认 1): ", 1)
+    if rc_min > rc_max: rc_min, rc_max = rc_max, rc_min
+
+    print("-" * 30)
+    # 充值金额输入
+    cash_min = get_int_input("▶ 2. 最小充值金额 (默认 100): ", 100)
+    cash_max = get_int_input("▶    最大充值金额 (默认 999999): ", 999999)
+    if cash_min > cash_max: cash_min, cash_max = cash_max, cash_min
+
+    print("-" * 30)
+    # 离线天数输入
+    off_min = get_int_input("▶ 3. 最小离线天数 (默认 3): ", 3)
+    off_max = get_int_input("▶    最大离线天数 (默认 9999): ", 9999)
+    if off_min > off_max: off_min, off_max = off_max, off_min
+
+    print("-" * 30)
+    # 账户余额输入
+    bal_min = get_int_input("▶ 4. 最小账户余额 (默认 0): ", 0)
+    bal_max = get_int_input("▶    最大账户余额 (默认 5): ", 5)
+    if bal_min > bal_max: bal_min, bal_max = bal_max, bal_min
+
+    print("="*40)
+
+    # 时间换算
     max_login_time = end_utc - timedelta(days=off_min)
     min_login_time = end_utc - timedelta(days=off_max)
 
-    print(f"\n[1/3] 已加载 config.json 中的筛选条件:")
+    print(f"\n[1/3] 条件确认完毕:")
     print(f"      - 充值次数: {rc_min} 至 {rc_max} 次")
     print(f"      - 充值金额: {cash_min} 至 {cash_max} 元")
     print(f"      - 账户余额: {bal_min} 至 {bal_max} 元")
-    print(f"      - 离线天数: {off_min} 至 {off_max} 天 (晚于 {min_login_time.strftime('%Y-%m-%d')} 且 早于 {max_login_time.strftime('%Y-%m-%d')})")
-    print(f"\n  (💡 若需修改条件，请关闭程序，用记事本打开 config.json 修改 filter_conditions)")
+    print(f"      - 离线天数: {off_min} 至 {off_max} 天 (最后登录晚于 {min_login_time.strftime('%Y-%m-%d')} 且早于 {max_login_time.strftime('%Y-%m-%d')})")
 
-    # 3. 构造 MongoDB 查询
     query = {
         "role": {"$ne": "gm"},
         "rechargeCount": {"$gte": rc_min, "$lte": rc_max},
@@ -297,7 +319,8 @@ def run_report_5_custom_users(db, config, end_utc, end_date_str):
         "latestLoginAt": {"$gte": min_login_time, "$lt": max_login_time}
     }
     
-    projection = {"_id": 1, "uid": 1, "phone": 1, "email": 1, "rechargeCash": 1, "latestLoginAt": 1}
+    # 【修复重点】：在此处 projection 中加入了 "cash": 1
+    projection = {"_id": 1, "uid": 1, "phone": 1, "email": 1, "rechargeCash": 1, "latestLoginAt": 1, "cash": 1}
 
     print(f"\n[2/3] 正在数据库中圈选符合条件的用户，请稍候...")
     cursor = db["users"].find(query, projection, batch_size=5000)
@@ -311,9 +334,9 @@ def run_report_5_custom_users(db, config, end_utc, end_date_str):
     
     with open(output_file, 'w', newline='', encoding='utf-8-sig') as f:
         writer = csv.writer(f)
-        writer.writerow(["uid", "手机号", "最后登陆时间(东八区)", "邮箱", "充值总金额", "KYC手机号"])
+        # 【修复重点】：在此处 csv 表头中加入了 "账户余额"
+        writer.writerow(["uid", "手机号", "最后登陆时间(东八区)", "邮箱", "充值总金额", "账户余额", "KYC手机号"])
 
-        # 封装的写入函数
         def process_and_write_batch(users, uids):
             wallets = db["wallets"].find({"user": {"$in": uids}}, {"user": 1, "banks": 1})
             kyc_map = {}
@@ -336,16 +359,15 @@ def run_report_5_custom_users(db, config, end_utc, end_date_str):
                     safe_date_format(u.get('latestLoginAt')),
                     u.get('email', '') or '',
                     u.get('rechargeCash', 0),
+                    u.get('cash', 0), # 【修复重点】：在此处把 u.get('cash', 0) 写入 CSV 数组
                     kyc_phone
                 ])
             writer.writerows(rows)
 
-        # 遍历游标
         for doc in cursor:
             docs_cache.append(doc)
             user_ids_cache.append(doc['_id'])
             count += 1
-            
             if len(docs_cache) >= batch_size:
                 process_and_write_batch(docs_cache, user_ids_cache)
                 docs_cache.clear()
@@ -355,14 +377,14 @@ def run_report_5_custom_users(db, config, end_utc, end_date_str):
         if docs_cache:
             process_and_write_batch(docs_cache, user_ids_cache)
 
-    print(f"✅ 导出成功！共计圈选出 {count} 名符合条件的用户。")
-    print(f"文件位置: {os.path.abspath(output_file)}")
+    print(f"✅ 导出成功！共计圈选出 {count} 名符合条件的用户。\n文件位置: {os.path.abspath(output_file)}")
 
 
 def main():
     print("=" * 50)
     print(f"      运营数据自动化导出工具 v{VERSION}")
     print("=" * 50)
+    print(f"运行目录: {BASE_DIR}")
 
     try:
         config = load_or_ask_config()
