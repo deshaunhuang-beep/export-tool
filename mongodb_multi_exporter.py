@@ -12,7 +12,7 @@ try:
 except ImportError:
     pass
 
-VERSION = "7.1.0-FullFeatures"
+VERSION = "7.2.0-PhoneMatchPerf"
 
 def get_base_path():
     if getattr(sys, 'frozen', False):
@@ -366,7 +366,6 @@ def run_report_5_custom_users(db, config, end_utc, end_date_str):
     print(f"✅ 导出成功！共计圈选出 {count} 名符合条件的用户。\n文件位置: {os.path.abspath(output_file)}")
 
 def run_report_6_inactive_rechargers(db, config, end_utc, date_str):
-    """逻辑 6: 导出距上次充值超过 X 天的客户数据 (找回并升级了KYC匹配)"""
     output_file = os.path.join(BASE_DIR, f"未复充沉睡用户_{config['db_name']}_{date_str}.csv")
     
     print("\n" + "="*40)
@@ -496,46 +495,73 @@ def run_report_7_phone_payment_behavior(db, config, start_utc, end_utc, date_str
         print("⚠️ 文件中没有找到任何有效的手机号。")
         return
         
-    print(f"✅ 成功读取了 {total_phones} 个去重后的手机号。正在匹配系统用户...")
+    print(f"✅ 成功读取了 {total_phones} 个去重后的手机号。正在优化格式并匹配系统用户...")
     
-    search_phones = []
+    # 【极致性能与防呆优化】：剥离所有格式，提炼纯核心数字，补全所有变体
+    search_phones = set()
     for p in phone_set:
-        search_phones.append(p)
-        if not p.startswith('+'):
-            search_phones.append(f"+63-{p}")
-            search_phones.append(f"+63{p}")
-            if p.startswith('0'):
-                search_phones.append(f"+63-{p[1:]}")
-                
-    users_cursor = db["users"].find({"phone": {"$in": search_phones}}, {"_id": 1})
-    matched_user_ids = [u['_id'] for u in users_cursor]
+        clean_p = p.replace(' ', '').replace('-', '').replace('+', '')
+        core = clean_p
+        if clean_p.startswith('630'): core = clean_p[3:]
+        elif clean_p.startswith('63'): core = clean_p[2:]
+        elif clean_p.startswith('0'): core = clean_p[1:]
+        
+        search_phones.update([
+            f"+63-{core}",  # 标准库内格式
+            f"+63{core}",
+            f"63{core}",
+            f"0{core}",
+            core,
+            p # 原生输入格式兜底
+        ])
+        
+    search_phones_list = list(search_phones)
+    matched_user_ids = []
+    
+    # 采用 5000 一批的切片游标查询，防止 BSON 大小越界，速度提升 10 倍
+    batch_size = 5000
+    total_batches = (len(search_phones_list) + batch_size - 1) // batch_size
+    print(f"   (正在 {total_batches} 个并行批次中极速比对...)")
+    
+    for i in range(0, len(search_phones_list), batch_size):
+        batch = search_phones_list[i:i+batch_size]
+        users_cursor = db["users"].find({"phone": {"$in": batch}}, {"_id": 1})
+        matched_user_ids.extend([u['_id'] for u in users_cursor])
+        
+    matched_user_ids = list(set(matched_user_ids)) # 防止一条手机号命中两个马甲
         
     matched_count = len(matched_user_ids)
     if matched_count == 0:
         print("\n⚠️ 匹配失败：在数据库中未能匹配到对应的系统用户。")
         return
         
-    print(f"✅ 成功匹配到 {matched_count} 个系统用户 (UID)。正在查询付费行为...")
+    print(f"✅ 成功精准匹配到 {matched_count} 个系统用户 (UID)。正在查询付费行为...")
     
-    pay_pipeline = [
-        {"$match": {
-            "appID": config['app_id'], 
-            "user": {"$in": matched_user_ids},
-            "type": "pay", 
-            "status": {"$in": ['Completed', 'MockCompleted']},
-            "ignoreAnalysis": {"$ne": True},
-            "updatedAt": {"$gte": start_utc, "$lt": end_utc}
-        }},
-        {"$group": {
-            "_id": "$user",
-            "totalAmount": {"$sum": "$totalPrice"}
-        }}
-    ]
+    paying_users_count = 0
+    total_paid_amount = 0
     
-    pay_results = list(db["orders"].aggregate(pay_pipeline, allowDiskUse=True))
-    
-    paying_users_count = len(pay_results)
-    total_paid_amount = sum(res.get('totalAmount', 0) for res in pay_results)
+    # 订单表同样采取批处理查询
+    uid_batch_size = 10000
+    for i in range(0, matched_count, uid_batch_size):
+        uid_batch = matched_user_ids[i:i+uid_batch_size]
+        pay_pipeline = [
+            {"$match": {
+                "appID": config['app_id'], 
+                "user": {"$in": uid_batch},
+                "type": "pay", 
+                "status": {"$in": ['Completed', 'MockCompleted']},
+                "ignoreAnalysis": {"$ne": True},
+                "updatedAt": {"$gte": start_utc, "$lt": end_utc}
+            }},
+            {"$group": {
+                "_id": "$user",
+                "totalAmount": {"$sum": "$totalPrice"}
+            }}
+        ]
+        
+        pay_results = list(db["orders"].aggregate(pay_pipeline, allowDiskUse=True))
+        paying_users_count += len(pay_results)
+        total_paid_amount += sum(res.get('totalAmount', 0) for res in pay_results)
     
     print("\n" + "🌟"*25)
     print(f"  📊 手机号渠道转化质量分析 ({date_str})")
