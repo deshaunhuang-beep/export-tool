@@ -13,7 +13,7 @@ try:
 except ImportError:
     pass
 
-VERSION = "7.3.0-ExactMatch"
+VERSION = "7.4.0-FirstRechargePro"
 
 def get_base_path():
     if getattr(sys, 'frozen', False):
@@ -133,9 +133,15 @@ def run_report_1_chongti(db, config, start_utc, end_utc, date_str):
         writer.writerows(rows_to_write)
     print(f"✅ 完成: {os.path.abspath(output_file)}")
 
+
 def run_report_2_shoucun(db, config, start_utc, end_utc, date_str):
     output_file = os.path.join(BASE_DIR, f"首存订单_{config['db_name']}_{date_str}.csv")
-    print(f"\n[1/4] 正在统计该时间段所有充值用户 ({date_str})...")
+    
+    print("\n" + "="*40)
+    min_amount = get_int_input("▶ 请输入首充达标金额下限 (默认 0 即不限制): ", 0)
+    print("="*40)
+    
+    print(f"\n[1/5] 正在统计该时间段所有充值用户 ({date_str})...")
     
     pay_pipeline = [
         {"$match": {"appID": config['app_id'], "updatedAt": {"$gte": start_utc, "$lt": end_utc}, 
@@ -144,20 +150,31 @@ def run_report_2_shoucun(db, config, start_utc, end_utc, date_str):
         {"$group": {"_id": "$user", "次数": {"$sum": 1}, "总额": {"$sum": "$totalPrice"}, "第一笔": {"$first": "$totalPrice"}}}
     ]
     pay_results = list(db["orders"].aggregate(pay_pipeline, allowDiskUse=True))
-    uids = [res['_id'] for res in pay_results]
     
-    print(f"[2/4] 正在筛选在这几天内产生首次充值的用户...")
+    # 【新增拦截】：只保留第一笔充值金额 >= min_amount 的用户
+    filtered_pay_results = [res for res in pay_results if res.get('第一笔', 0) >= min_amount]
+    uids = [res['_id'] for res in filtered_pay_results]
+    
+    print(f"[2/5] 筛选出 {len(uids)} 名充值达标用户，正在验证是否为【历史首次充值】...")
     shoucun_users = {u['_id']: u for u in db["users"].find({
         "_id": {"$in": uids},
         "meta.firstRechargeAt": {"$gte": start_utc, "$lt": end_utc}
-    }, {"uid": 1, "meta.adChannel": 1, "meta.firstRechargeAt": 1, "createdAt": 1})}
+    }, {"uid": 1, "meta.adChannel": 1, "meta.firstRechargeAt": 1, "createdAt": 1, "phone": 1})}
     
     sc_uids = list(shoucun_users.keys())
     if not sc_uids:
-        print("⚠️ 该时间段内无首存用户。")
+        print("⚠️ 该时间段内无符合条件的首存用户。")
         return
 
-    print(f"[3/4] 抓取提款与日报数据 (共 {len(sc_uids)} 人)...")
+    print(f"[3/5] 正在匹配 {len(sc_uids)} 人的 KYC 钱包信息...")
+    wallets = db["wallets"].find({"user": {"$in": sc_uids}}, {"user": 1, "banks": 1})
+    kyc_map = {}
+    for w in wallets:
+        banks = w.get("banks", [])
+        if banks and isinstance(banks, list) and len(banks) > 0:
+            kyc_map[w["user"]] = banks[0].get("phone", "")
+
+    print(f"[4/5] 抓取提款与日报数据...")
     wd_pipeline = [{"$match": {"user": {"$in": sc_uids}, "type": "withdrawal", "status": "Completed", 
                                "updatedAt": {"$gte": start_utc, "$lt": end_utc}}},
                    {"$group": {"_id": "$user", "total": {"$sum": "$totalPrice"}}}]
@@ -169,24 +186,47 @@ def run_report_2_shoucun(db, config, start_utc, end_utc, date_str):
     ]
     daily_map = {res['_id']: res for res in db["transactiondailies"].aggregate(daily_pipeline)}
 
-    print(f"[4/4] 导出报表...")
-    headers = ["用户渠道", "uid", "注册日期", "首次充值日期", "区间内存款次数", "第一笔充值金额", "区间内总充值金额", "区间内提款金额", "区间内获得真金奖励", "区间内投注金额"]
+    print(f"[5/5] 导出报表...")
+    # 【新增表头】：注册手机号，KYC手机号
+    headers = [
+        "uid", "注册手机号", "KYC手机号", "用户渠道", "注册日期", "首次充值日期", 
+        "第一笔充值金额", "区间内存款次数", "区间内总充值金额", "区间内提款金额", 
+        "区间内获得真金奖励", "区间内投注金额"
+    ]
     with open(output_file, 'w', newline='', encoding='utf-8-sig') as f:
         writer = csv.writer(f)
         writer.writerow(headers)
         rows_to_write = []
-        for res in pay_results:
+        for res in filtered_pay_results:
             uid = res['_id']
             if uid not in shoucun_users: continue
+            
             u = shoucun_users[uid]
             d = daily_map.get(uid, {})
+            
+            # 处理手机号防断行格式
+            raw_phone = u.get('phone', '') or ''
+            phone = f"\t{raw_phone}" if raw_phone else ""
+            raw_kyc = kyc_map.get(uid, "")
+            kyc_phone = f"\t{raw_kyc}" if raw_kyc else ""
+            
             rows_to_write.append([
+                u.get('uid', ''),
+                phone,
+                kyc_phone,
                 "广告" if u.get('meta', {}).get('adChannel') else "自然裂变",
-                u.get('uid', ''), safe_date_format(u.get('createdAt')), safe_date_format(u.get('meta', {}).get('firstRechargeAt')),
-                res.get('次数', 0), res.get('第一笔', 0), res.get('总额', 0), wd_map.get(uid, 0), d.get('rewardCash', 0), d.get('betAmount', 0)
+                safe_date_format(u.get('createdAt')), 
+                safe_date_format(u.get('meta', {}).get('firstRechargeAt')),
+                res.get('第一笔', 0), 
+                res.get('次数', 0), 
+                res.get('总额', 0), 
+                wd_map.get(uid, 0), 
+                d.get('rewardCash', 0), 
+                d.get('betAmount', 0)
             ])
         writer.writerows(rows_to_write)
     print(f"✅ 完成: {os.path.abspath(output_file)}")
+
 
 def run_report_3_sms_recall(db, config, start_utc, end_utc, date_str):
     print(f"\n--- [书生计算 SMS 召回情况 ({date_str})] ---")
@@ -498,13 +538,10 @@ def run_report_7_phone_payment_behavior(db, config, start_utc, end_utc, date_str
         
     print(f"✅ 成功读取了 {total_phones} 个去重后的手机号。正在按照标准格式处理并匹配系统用户...")
     
-    # 极致性能优化：严格按照 "+63-手机号" 格式拼接
     search_phones = set()
     for p in phone_set:
-        # 去除可能存在的空格、加号、减号等杂质字符
         clean_p = p.replace(' ', '').replace('+', '').replace('-', '')
         if len(clean_p) > 2:
-            # 核心规则：前面加“+”，在第二位后面加“-”
             formatted_p = f"+{clean_p[:2]}-{clean_p[2:]}"
             search_phones.add(formatted_p)
             
@@ -518,7 +555,6 @@ def run_report_7_phone_payment_behavior(db, config, start_utc, end_utc, date_str
     for i in range(0, len(search_phones_list), batch_size):
         batch = search_phones_list[i:i+batch_size]
         
-        # 加入防弹衣：断线自动重连机制
         for attempt in range(3):
             try:
                 users = list(db["users"].find({"phone": {"$in": batch}}, {"_id": 1}))
@@ -529,9 +565,8 @@ def run_report_7_phone_payment_behavior(db, config, start_utc, end_utc, date_str
                     print(f"\n     ⚠️ 检测到数据库连接闪断，冷静等待 2 秒后自动重试 (批次 {i//batch_size + 1})...")
                     time.sleep(2)
                 else:
-                    raise  # 如果重试了 3 次还是断线，只能放弃
+                    raise
         
-        # 强制微秒级休眠，给数据库 CPU 留出呼吸时间，防止被防火墙切断
         time.sleep(0.02)
         
         current_batch = i // batch_size + 1
@@ -570,7 +605,6 @@ def run_report_7_phone_payment_behavior(db, config, start_utc, end_utc, date_str
             }}
         ]
         
-        # 订单查询也加入防弹衣
         for attempt in range(3):
             try:
                 pay_results = list(db["orders"].aggregate(pay_pipeline, allowDiskUse=True))
@@ -584,7 +618,7 @@ def run_report_7_phone_payment_behavior(db, config, start_utc, end_utc, date_str
                 else:
                     raise
                     
-        time.sleep(0.02) # 同样给数据库呼吸时间
+        time.sleep(0.02)
         
         current_order_batch = i // uid_batch_size + 1
         if total_order_batches > 1 and current_order_batch % 5 == 0:
@@ -624,7 +658,7 @@ def main():
 
         print("\n--- 请选择要执行的功能 ---")
         print("[1] 导出 - 充提数据")
-        print("[2] 导出 - 首存订单")
+        print("[2] 导出 - 首存订单 (支持指定最低金额并含手机号)")
         print("[3] 打印 - 书生计算SMS召回情况 (支持 .csv / .xlsx)")
         print("[4] 导出 - 书生筛选注册未充值用户 (用于拉新/激活)")
         print("[5] 导出 - 查询指定条件用户群 (用于精准圈选)")
@@ -659,7 +693,6 @@ def main():
         else:
             print(f"\n⏳ 统计时间范围 (北京时间): {start_date.strftime('%Y-%m-%d 00:00:00')} -> {end_date.strftime('%Y-%m-%d 23:59:59')}")
 
-        # 给客户端加上超时配置护甲
         print("\n正在连接 MongoDB...")
         client = pymongo.MongoClient(
             config['mongo_uri'], 
