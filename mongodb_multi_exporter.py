@@ -12,7 +12,7 @@ try:
 except ImportError:
     pass
 
-VERSION = "7.2.0-PhoneMatchPerf"
+VERSION = "7.2.1-PhoneMatchPerf-Fix"
 
 def get_base_path():
     if getattr(sys, 'frozen', False):
@@ -497,7 +497,7 @@ def run_report_7_phone_payment_behavior(db, config, start_utc, end_utc, date_str
         
     print(f"✅ 成功读取了 {total_phones} 个去重后的手机号。正在优化格式并匹配系统用户...")
     
-    # 【极致性能与防呆优化】：剥离所有格式，提炼纯核心数字，补全所有变体
+    # 智能剥离所有格式，提炼纯核心数字，补全所有变体
     search_phones = set()
     for p in phone_set:
         clean_p = p.replace(' ', '').replace('-', '').replace('+', '')
@@ -507,28 +507,29 @@ def run_report_7_phone_payment_behavior(db, config, start_utc, end_utc, date_str
         elif clean_p.startswith('0'): core = clean_p[1:]
         
         search_phones.update([
-            f"+63-{core}",  # 标准库内格式
-            f"+63{core}",
-            f"63{core}",
-            f"0{core}",
-            core,
-            p # 原生输入格式兜底
+            f"+63-{core}", f"+63{core}", f"63{core}", f"0{core}", core, p
         ])
         
     search_phones_list = list(search_phones)
     matched_user_ids = []
     
-    # 采用 5000 一批的切片游标查询，防止 BSON 大小越界，速度提升 10 倍
-    batch_size = 5000
+    # 【修复重点】：将每批次查询的数据量从 5000 下调到 1000，防止触发 MongoDB 强杀机制
+    batch_size = 1000
     total_batches = (len(search_phones_list) + batch_size - 1) // batch_size
-    print(f"   (正在 {total_batches} 个并行批次中极速比对...)")
+    print(f"   (正在 {total_batches} 个并行批次中极速比对，请稍候...)")
     
     for i in range(0, len(search_phones_list), batch_size):
         batch = search_phones_list[i:i+batch_size]
-        users_cursor = db["users"].find({"phone": {"$in": batch}}, {"_id": 1})
-        matched_user_ids.extend([u['_id'] for u in users_cursor])
+        # 【修复重点】：直接 list() 获取，防止 cursor 超时
+        users = list(db["users"].find({"phone": {"$in": batch}}, {"_id": 1}))
+        matched_user_ids.extend([u['_id'] for u in users])
         
-    matched_user_ids = list(set(matched_user_ids)) # 防止一条手机号命中两个马甲
+        # 每隔一定批次打印进度
+        current_batch = i // batch_size + 1
+        if current_batch % 50 == 0:
+            print(f"     已比对完成 {current_batch} / {total_batches} 批次...")
+            
+    matched_user_ids = list(set(matched_user_ids))
         
     matched_count = len(matched_user_ids)
     if matched_count == 0:
@@ -540,8 +541,10 @@ def run_report_7_phone_payment_behavior(db, config, start_utc, end_utc, date_str
     paying_users_count = 0
     total_paid_amount = 0
     
-    # 订单表同样采取批处理查询
-    uid_batch_size = 10000
+    # 【修复重点】：订单表查询步长下调到 2000
+    uid_batch_size = 2000
+    total_order_batches = (matched_count + uid_batch_size - 1) // uid_batch_size
+    
     for i in range(0, matched_count, uid_batch_size):
         uid_batch = matched_user_ids[i:i+uid_batch_size]
         pay_pipeline = [
@@ -562,6 +565,10 @@ def run_report_7_phone_payment_behavior(db, config, start_utc, end_utc, date_str
         pay_results = list(db["orders"].aggregate(pay_pipeline, allowDiskUse=True))
         paying_users_count += len(pay_results)
         total_paid_amount += sum(res.get('totalAmount', 0) for res in pay_results)
+        
+        current_order_batch = i // uid_batch_size + 1
+        if total_order_batches > 1 and current_order_batch % 5 == 0:
+            print(f"     订单查询进度 {current_order_batch} / {total_order_batches} ...")
     
     print("\n" + "🌟"*25)
     print(f"  📊 手机号渠道转化质量分析 ({date_str})")
