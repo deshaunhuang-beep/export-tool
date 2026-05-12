@@ -12,8 +12,7 @@ try:
 except ImportError:
     pass
 
-# 更新了版本号
-VERSION = "6.3.0-FixCash"
+VERSION = "7.0.0-PhoneBehavior"
 
 def get_base_path():
     if getattr(sys, 'frozen', False):
@@ -73,6 +72,16 @@ def load_or_ask_config():
         json.dump(config, f, indent=4, ensure_ascii=False)
 
     return config
+
+def get_int_input(prompt_text, default_val):
+    val = input(prompt_text).strip()
+    if not val:
+        return default_val
+    try:
+        return int(val)
+    except ValueError:
+        print(f"   ⚠️ 输入无效，自动使用默认值: {default_val}")
+        return default_val
 
 def run_report_1_chongti(db, config, start_utc, end_utc, date_str):
     output_file = os.path.join(BASE_DIR, f"充提数据_{config['db_name']}_{date_str}.csv")
@@ -259,17 +268,6 @@ def run_report_4_unrecharged_users(db, config, end_utc, end_date_str):
         if batch_data: writer.writerows(batch_data)
     print(f"✅ 导出成功！共计 {count} 名注册未充值用户。\n文件位置: {os.path.abspath(output_file)}")
 
-def get_int_input(prompt_text, default_val):
-    """辅助函数：处理用户输入，支持默认值和错误回退"""
-    val = input(prompt_text).strip()
-    if not val:
-        return default_val
-    try:
-        return int(val)
-    except ValueError:
-        print(f"   ⚠️ 输入无效，自动使用默认值: {default_val}")
-        return default_val
-
 def run_report_5_custom_users(db, config, end_utc, end_date_str):
     output_file = os.path.join(BASE_DIR, f"圈选用户群_{config['db_name']}_{end_date_str}.csv")
     
@@ -277,32 +275,27 @@ def run_report_5_custom_users(db, config, end_utc, end_date_str):
     print(" 🎯 请输入筛选条件 (直接回车将使用默认值)")
     print("="*40)
 
-    # 充值次数输入
     rc_min = get_int_input("▶ 1. 最小充值次数 (默认 1): ", 1)
     rc_max = get_int_input("▶    最大充值次数 (默认 1): ", 1)
     if rc_min > rc_max: rc_min, rc_max = rc_max, rc_min
 
     print("-" * 30)
-    # 充值金额输入
     cash_min = get_int_input("▶ 2. 最小充值金额 (默认 100): ", 100)
     cash_max = get_int_input("▶    最大充值金额 (默认 999999): ", 999999)
     if cash_min > cash_max: cash_min, cash_max = cash_max, cash_min
 
     print("-" * 30)
-    # 离线天数输入
     off_min = get_int_input("▶ 3. 最小离线天数 (默认 3): ", 3)
     off_max = get_int_input("▶    最大离线天数 (默认 9999): ", 9999)
     if off_min > off_max: off_min, off_max = off_max, off_min
 
     print("-" * 30)
-    # 账户余额输入
     bal_min = get_int_input("▶ 4. 最小账户余额 (默认 0): ", 0)
     bal_max = get_int_input("▶    最大账户余额 (默认 5): ", 5)
     if bal_min > bal_max: bal_min, bal_max = bal_max, bal_min
 
     print("="*40)
 
-    # 时间换算
     max_login_time = end_utc - timedelta(days=off_min)
     min_login_time = end_utc - timedelta(days=off_max)
 
@@ -348,18 +341,12 @@ def run_report_5_custom_users(db, config, end_utc, end_date_str):
             for u in users:
                 raw_phone = u.get('phone', '') or ''
                 phone = f"\t{raw_phone}" if raw_phone else ""
-                
                 raw_kyc = kyc_map.get(u['_id'], "")
                 kyc_phone = f"\t{raw_kyc}" if raw_kyc else ""
                 
                 rows.append([
-                    u.get('uid', ''),
-                    phone,
-                    safe_date_format(u.get('latestLoginAt')),
-                    u.get('email', '') or '',
-                    u.get('rechargeCash', 0),
-                    u.get('cash', 0), 
-                    kyc_phone
+                    u.get('uid', ''), phone, safe_date_format(u.get('latestLoginAt')),
+                    u.get('email', '') or '', u.get('rechargeCash', 0), u.get('cash', 0), kyc_phone
                 ])
             writer.writerows(rows)
 
@@ -378,107 +365,114 @@ def run_report_5_custom_users(db, config, end_utc, end_date_str):
 
     print(f"✅ 导出成功！共计圈选出 {count} 名符合条件的用户。\n文件位置: {os.path.abspath(output_file)}")
 
-def run_report_6_inactive_rechargers(db, config, end_utc, end_date_str):
-    print("\n" + "="*40)
-    days_inactive = get_int_input("▶ 请输入距离上次充值的天数 (默认 3): ", 3)
-    print("="*40)
-
-    # 倒推时间阈值
-    threshold_utc = end_utc - timedelta(days=days_inactive)
-    output_file = os.path.join(BASE_DIR, f"超{days_inactive}天未充值用户_{config['db_name']}_{end_date_str}.csv")
-
-    print(f"\n[1/3] 正在筛选距上次充值超过 {days_inactive} 天的用户...")
-    print(f"      (最后充值时间早于东八区: {safe_date_format(threshold_utc)})")
-
-    # 查询条件：排除GM、必须有过充值记录、最后充值时间早于阈值 或 字段不存在(兼容历史数据)
-    query = {
-        "role": {"$ne": "gm"},
-        "rechargeCount": {"$gt": 0},
-        "$or": [
-            {"meta.lastRechargeAt": {"$lt": threshold_utc}},
-            {"meta.lastRechargeAt": {"$exists": False}},
-            {"meta.lastRechargeAt": None}
-        ]
-    }
+def run_report_7_phone_payment_behavior(db, config, start_utc, end_utc, date_str):
+    """逻辑 7: 根据手机号码查询用户付费行为"""
+    print(f"\n--- [根据手机号码查询用户付费行为 ({date_str})] ---")
     
-    projection = {
-        "_id": 1, 
-        "phone": 1, 
-        "rechargeCash": 1, 
-        "rechargeCount": 1, 
-        "withdrawCompletedCash": 1, 
-        "withdrawCash": 1,
-        "withdrawCompletedCount": 1, 
-        "withdrawCount": 1,
-        "latestLoginAt": 1, 
-        "meta.lastRecharge": 1,
-        "meta.lastRechargeAt": 1
-    }
-
-    cursor = db["users"].find(query, projection, batch_size=5000)
-
-    print(f"[2/3] 正在匹配 KYC 认证数据并生成导出文件...")
+    # 1. 扫描当前目录下的 .txt 文件
+    txt_files = [f for f in os.listdir(BASE_DIR) if f.lower().endswith('.txt')]
     
-    count = 0
-    batch_size = 5000
-    docs_cache = []
-    user_ids_cache = []
+    if not txt_files:
+        print("\n❌ 当前目录下没有找到任何 .txt 文件！")
+        print("   请先将包含手机号的 .txt 文件（每行一个手机号）放入本程序所在的文件夹。")
+        return
+        
+    print("\n📂 找到以下 .txt 文件，请选择：")
+    for idx, f in enumerate(txt_files):
+        print(f"  [{idx + 1}] {f}")
+        
+    file_idx = get_int_input("\n▶ 请输入文件编号进行选择: ", 1)
+    if file_idx < 1 or file_idx > len(txt_files):
+        print("❌ 无效的选择，操作取消。")
+        return
+        
+    selected_file = os.path.join(BASE_DIR, txt_files[file_idx - 1])
+    print(f"\n📄 已选择文件: {txt_files[file_idx - 1]}")
     
-    with open(output_file, 'w', newline='', encoding='utf-8-sig') as f:
-        writer = csv.writer(f)
-        # 表头添加了“最后一次充值时间”以便于核对脏数据
-        writer.writerow(["注册号码", "认证账户(KYC)", "充值金额", "充值次数", "提现金额", "提现次数", "最后一次登录时间", "最后一次充值金额", "最后一次充值时间(东八区)"])
-
-        def process_and_write_batch(users, uids):
-            wallets = db["wallets"].find({"user": {"$in": uids}}, {"user": 1, "banks": 1})
-            kyc_map = {}
-            for w in wallets:
-                banks = w.get("banks", [])
-                if banks and isinstance(banks, list) and len(banks) > 0:
-                    kyc_map[w["user"]] = banks[0].get("phone", "")
-
-            rows = []
-            for u in users:
-                raw_phone = u.get('phone', '') or ''
-                phone = f"\t{raw_phone}" if raw_phone else ""
+    # 2. 读取手机号码并去重
+    phone_set = set()
+    try:
+        with open(selected_file, 'r', encoding='utf-8-sig') as f:
+            for line in f:
+                p = line.strip()
+                if p:
+                    phone_set.add(p)
+    except Exception as e:
+        print(f"❌ 读取文件失败: {e}")
+        return
+        
+    total_phones = len(phone_set)
+    if total_phones == 0:
+        print("⚠️ 文件中没有找到任何有效的手机号。")
+        return
+        
+    print(f"✅ 从文件中成功读取了 {total_phones} 个去重后的手机号。正在数据库中匹配系统用户...")
+    
+    # 3. 构造灵活的查询条件 (处理前缀，保证高匹配率)
+    # 因为库里的手机号可能有 +63- 前缀，或者没有，所以我们做扩展查询
+    search_phones = []
+    for p in phone_set:
+        search_phones.append(p)
+        if not p.startswith('+'):
+            search_phones.append(f"+63-{p}")
+            search_phones.append(f"+63{p}")
+            # 如果是 0 开头的 (如 09xxxx)，也尝试去掉 0 加上前缀搜索
+            if p.startswith('0'):
+                search_phones.append(f"+63-{p[1:]}")
                 
-                raw_kyc = kyc_map.get(u['_id'], "")
-                kyc_phone = f"\t{raw_kyc}" if raw_kyc else ""
-                
-                # 提现数据优先取 Completed 字段，如果没有则降级取常规字段
-                wd_cash = u.get('withdrawCompletedCash', u.get('withdrawCash', 0))
-                wd_count = u.get('withdrawCompletedCount', u.get('withdrawCount', 0))
-                last_rc = u.get('meta', {}).get('lastRecharge', 0)
-                last_rc_at = u.get('meta', {}).get('lastRechargeAt')
-
-                rows.append([
-                    phone,
-                    kyc_phone,
-                    u.get('rechargeCash', 0),
-                    u.get('rechargeCount', 0),
-                    wd_cash,
-                    wd_count,
-                    safe_date_format(u.get('latestLoginAt')),
-                    last_rc,
-                    safe_date_format(last_rc_at)
-                ])
-            writer.writerows(rows)
-
-        for doc in cursor:
-            docs_cache.append(doc)
-            user_ids_cache.append(doc['_id'])
-            count += 1
-            if len(docs_cache) >= batch_size:
-                process_and_write_batch(docs_cache, user_ids_cache)
-                docs_cache.clear()
-                user_ids_cache.clear()
-                print(f"  已处理 {count} 条...")
-
-        if docs_cache:
-            process_and_write_batch(docs_cache, user_ids_cache)
-
-    print(f"[3/3] ✅ 导出成功！共计圈选出 {count} 名超 {days_inactive} 天未充值客户。\n文件位置: {os.path.abspath(output_file)}")
-
+    # 去 users 表里反查这批手机号对应的 _id (ObjectId)
+    users_cursor = db["users"].find({"phone": {"$in": search_phones}}, {"_id": 1})
+    matched_user_ids = []
+    for u in users_cursor:
+        matched_user_ids.append(u['_id'])
+        
+    matched_count = len(matched_user_ids)
+    if matched_count == 0:
+        print("\n⚠️ 匹配失败：在数据库中未能匹配到这批手机号对应的任何系统用户。")
+        return
+        
+    print(f"✅ 成功匹配到 {matched_count} 个真实的系统用户 (UID)。正在查询他们在该时间段的付费行为...")
+    
+    # 4. 根据查出的 _id，去 orders 表查询这段时间内的 pay 成功订单
+    pay_pipeline = [
+        {"$match": {
+            "appID": config['app_id'], 
+            "user": {"$in": matched_user_ids},
+            "type": "pay", 
+            "status": {"$in": ['Completed', 'MockCompleted']},
+            "ignoreAnalysis": {"$ne": True},
+            "updatedAt": {"$gte": start_utc, "$lt": end_utc}
+        }},
+        {"$group": {
+            "_id": "$user",
+            "totalAmount": {"$sum": "$totalPrice"}
+        }}
+    ]
+    
+    pay_results = list(db["orders"].aggregate(pay_pipeline, allowDiskUse=True))
+    
+    paying_users_count = len(pay_results)
+    total_paid_amount = sum(res.get('totalAmount', 0) for res in pay_results)
+    
+    # 5. 计算指标与精美输出
+    print("\n" + "🌟"*25)
+    print(f"  📊 手机号渠道转化质量分析 ({date_str})")
+    print("🌟"*25)
+    print(f"🔹 1. 文件提取手机号总数 : {total_phones:,} 个")
+    print(f"🔹 2. 成功定位系统用户数 : {matched_count:,} 人")
+    print(f"🔹 3. 期间产生付费用户数 : {paying_users_count:,} 人")
+    
+    if matched_count > 0:
+        conversion_rate = paying_users_count / matched_count
+        print(f"🔹 4. 付费转化率 (付费/匹配): {conversion_rate:.2%}")
+    
+    if paying_users_count > 0:
+        arpu = total_paid_amount / paying_users_count
+        print(f"🔹 5. 期间累积总付费金额   : {total_paid_amount:,.2f}")
+        print(f"🔹 6. 期间付费用户 ARPU 值 : {arpu:,.2f}")
+    else:
+        print("🔹 期间无任何付费行为")
+    print("🌟"*25)
 
 def main():
     print("=" * 50)
@@ -499,7 +493,7 @@ def main():
         print("[3] 打印 - 书生计算SMS召回情况 (支持 .csv / .xlsx)")
         print("[4] 导出 - 书生筛选注册未充值用户 (用于拉新/激活)")
         print("[5] 导出 - 查询指定条件用户群 (用于精准召回/高净值维护)")
-        print("[6] 导出 - 距上次充值超过X天的客户数据 (促活/召回)")
+        print("[7] 打印 - 根据手机号码查询用户付费行为 (需本地txt)")
         
         choice = input(">> ").strip()
 
@@ -524,7 +518,7 @@ def main():
         end_utc = end_date + timedelta(days=1) - timedelta(hours=8)
         date_str = start_date.strftime("%Y-%m-%d") if start_date == end_date else f"{start_date.strftime('%Y-%m-%d')}_至_{end_date.strftime('%Y-%m-%d')}"
         
-        if choice in ['4', '5', '6']:
+        if choice in ['4', '5']:
             print(f"\n⏳ 统计截止时间基准 (北京时间): {end_date.strftime('%Y-%m-%d 23:59:59')}")
         else:
             print(f"\n⏳ 统计时间范围 (北京时间): {start_date.strftime('%Y-%m-%d 00:00:00')} -> {end_date.strftime('%Y-%m-%d 23:59:59')}")
@@ -540,7 +534,7 @@ def main():
         elif choice == '3': run_report_3_sms_recall(db, config, start_utc, end_utc, date_str)
         elif choice == '4': run_report_4_unrecharged_users(db, config, end_utc, end_date.strftime('%Y-%m-%d'))
         elif choice == '5': run_report_5_custom_users(db, config, end_utc, end_date.strftime('%Y-%m-%d'))
-        elif choice == '6': run_report_6_inactive_rechargers(db, config, end_utc, end_date.strftime('%Y-%m-%d'))
+        elif choice == '7': run_report_7_phone_payment_behavior(db, config, start_utc, end_utc, date_str)
         else: print("❌ 无效选择")
 
     except Exception as e:
