@@ -13,7 +13,7 @@ try:
 except ImportError:
     pass
 
-VERSION = "7.4.0-FirstRechargePro"
+VERSION = "8.0.0-EightToolsComplete"
 
 def get_base_path():
     if getattr(sys, 'frozen', False):
@@ -133,15 +133,10 @@ def run_report_1_chongti(db, config, start_utc, end_utc, date_str):
         writer.writerows(rows_to_write)
     print(f"✅ 完成: {os.path.abspath(output_file)}")
 
-
 def run_report_2_shoucun(db, config, start_utc, end_utc, date_str):
+    """【恢复版本】原汁原味的普通首存报表"""
     output_file = os.path.join(BASE_DIR, f"首存订单_{config['db_name']}_{date_str}.csv")
-    
-    print("\n" + "="*40)
-    min_amount = get_int_input("▶ 请输入首充达标金额下限 (默认 0 即不限制): ", 0)
-    print("="*40)
-    
-    print(f"\n[1/5] 正在统计该时间段所有充值用户 ({date_str})...")
+    print(f"\n[1/4] 正在统计该时间段所有充值用户 ({date_str})...")
     
     pay_pipeline = [
         {"$match": {"appID": config['app_id'], "updatedAt": {"$gte": start_utc, "$lt": end_utc}, 
@@ -150,31 +145,20 @@ def run_report_2_shoucun(db, config, start_utc, end_utc, date_str):
         {"$group": {"_id": "$user", "次数": {"$sum": 1}, "总额": {"$sum": "$totalPrice"}, "第一笔": {"$first": "$totalPrice"}}}
     ]
     pay_results = list(db["orders"].aggregate(pay_pipeline, allowDiskUse=True))
+    uids = [res['_id'] for res in pay_results]
     
-    # 【新增拦截】：只保留第一笔充值金额 >= min_amount 的用户
-    filtered_pay_results = [res for res in pay_results if res.get('第一笔', 0) >= min_amount]
-    uids = [res['_id'] for res in filtered_pay_results]
-    
-    print(f"[2/5] 筛选出 {len(uids)} 名充值达标用户，正在验证是否为【历史首次充值】...")
+    print(f"[2/4] 正在筛选在这几天内产生首次充值的用户...")
     shoucun_users = {u['_id']: u for u in db["users"].find({
         "_id": {"$in": uids},
         "meta.firstRechargeAt": {"$gte": start_utc, "$lt": end_utc}
-    }, {"uid": 1, "meta.adChannel": 1, "meta.firstRechargeAt": 1, "createdAt": 1, "phone": 1})}
+    }, {"uid": 1, "meta.adChannel": 1, "meta.firstRechargeAt": 1, "createdAt": 1})}
     
     sc_uids = list(shoucun_users.keys())
     if not sc_uids:
-        print("⚠️ 该时间段内无符合条件的首存用户。")
+        print("⚠️ 该时间段内无首存用户。")
         return
 
-    print(f"[3/5] 正在匹配 {len(sc_uids)} 人的 KYC 钱包信息...")
-    wallets = db["wallets"].find({"user": {"$in": sc_uids}}, {"user": 1, "banks": 1})
-    kyc_map = {}
-    for w in wallets:
-        banks = w.get("banks", [])
-        if banks and isinstance(banks, list) and len(banks) > 0:
-            kyc_map[w["user"]] = banks[0].get("phone", "")
-
-    print(f"[4/5] 抓取提款与日报数据...")
+    print(f"[3/4] 抓取提款与日报数据 (共 {len(sc_uids)} 人)...")
     wd_pipeline = [{"$match": {"user": {"$in": sc_uids}, "type": "withdrawal", "status": "Completed", 
                                "updatedAt": {"$gte": start_utc, "$lt": end_utc}}},
                    {"$group": {"_id": "$user", "total": {"$sum": "$totalPrice"}}}]
@@ -186,47 +170,24 @@ def run_report_2_shoucun(db, config, start_utc, end_utc, date_str):
     ]
     daily_map = {res['_id']: res for res in db["transactiondailies"].aggregate(daily_pipeline)}
 
-    print(f"[5/5] 导出报表...")
-    # 【新增表头】：注册手机号，KYC手机号
-    headers = [
-        "uid", "注册手机号", "KYC手机号", "用户渠道", "注册日期", "首次充值日期", 
-        "第一笔充值金额", "区间内存款次数", "区间内总充值金额", "区间内提款金额", 
-        "区间内获得真金奖励", "区间内投注金额"
-    ]
+    print(f"[4/4] 导出报表...")
+    headers = ["用户渠道", "uid", "注册日期", "首次充值日期", "区间内存款次数", "第一笔充值金额", "区间内总充值金额", "区间内提款金额", "区间内获得真金奖励", "区间内投注金额"]
     with open(output_file, 'w', newline='', encoding='utf-8-sig') as f:
         writer = csv.writer(f)
         writer.writerow(headers)
         rows_to_write = []
-        for res in filtered_pay_results:
+        for res in pay_results:
             uid = res['_id']
             if uid not in shoucun_users: continue
-            
             u = shoucun_users[uid]
             d = daily_map.get(uid, {})
-            
-            # 处理手机号防断行格式
-            raw_phone = u.get('phone', '') or ''
-            phone = f"\t{raw_phone}" if raw_phone else ""
-            raw_kyc = kyc_map.get(uid, "")
-            kyc_phone = f"\t{raw_kyc}" if raw_kyc else ""
-            
             rows_to_write.append([
-                u.get('uid', ''),
-                phone,
-                kyc_phone,
                 "广告" if u.get('meta', {}).get('adChannel') else "自然裂变",
-                safe_date_format(u.get('createdAt')), 
-                safe_date_format(u.get('meta', {}).get('firstRechargeAt')),
-                res.get('第一笔', 0), 
-                res.get('次数', 0), 
-                res.get('总额', 0), 
-                wd_map.get(uid, 0), 
-                d.get('rewardCash', 0), 
-                d.get('betAmount', 0)
+                u.get('uid', ''), safe_date_format(u.get('createdAt')), safe_date_format(u.get('meta', {}).get('firstRechargeAt')),
+                res.get('次数', 0), res.get('第一笔', 0), res.get('总额', 0), wd_map.get(uid, 0), d.get('rewardCash', 0), d.get('betAmount', 0)
             ])
         writer.writerows(rows_to_write)
     print(f"✅ 完成: {os.path.abspath(output_file)}")
-
 
 def run_report_3_sms_recall(db, config, start_utc, end_utc, date_str):
     print(f"\n--- [书生计算 SMS 召回情况 ({date_str})] ---")
@@ -643,6 +604,124 @@ def run_report_7_phone_payment_behavior(db, config, start_utc, end_utc, date_str
         print("🔹 期间无任何付费行为")
     print("🌟"*25)
 
+
+def run_report_8_shoucun_pro(db, config, start_utc, end_utc, date_str):
+    """【新增版本】光速精准查询：支持最低金额、KYC手机号、注册手机号"""
+    output_file = os.path.join(BASE_DIR, f"首存达标用户_{config['db_name']}_{date_str}.csv")
+    
+    print("\n" + "="*40)
+    min_amount = get_int_input("▶ 请输入首充达标金额下限 (默认 0 即不限制): ", 0)
+    print("="*40)
+    
+    print(f"\n[1/5] 正在从用户表极速筛选该时间段的首充用户...")
+    
+    user_query = {
+        "meta.firstRechargeAt": {"$gte": start_utc, "$lt": end_utc}
+    }
+    if min_amount > 0:
+        user_query["meta.firstRecharge"] = {"$gte": min_amount}
+        
+    shoucun_users = {u['_id']: u for u in db["users"].find(user_query, {
+        "uid": 1, "meta.adChannel": 1, "meta.firstRechargeAt": 1, "meta.firstRecharge": 1, "createdAt": 1, "phone": 1
+    })}
+    
+    sc_uids = list(shoucun_users.keys())
+    if not sc_uids:
+        print("⚠️ 该时间段内无符合条件的首存用户。")
+        return
+        
+    print(f"[2/5] 成功筛选出 {len(sc_uids)} 名首充用户，正在分批匹配 KYC 钱包信息...")
+    kyc_map = {}
+    batch_size = 5000
+    for i in range(0, len(sc_uids), batch_size):
+        batch = sc_uids[i:i+batch_size]
+        wallets = db["wallets"].find({"user": {"$in": batch}}, {"user": 1, "banks": 1})
+        for w in wallets:
+            banks = w.get("banks", [])
+            if banks and isinstance(banks, list) and len(banks) > 0:
+                kyc_map[w["user"]] = banks[0].get("phone", "")
+
+    print(f"[3/5] 正在拉取这些首充用户在区间内的订单流水...")
+    stats_map = {uid: {'pay_amt': 0, 'pay_count': 0, 'wd_amt': 0} for uid in sc_uids}
+    
+    for i in range(0, len(sc_uids), batch_size):
+        batch = sc_uids[i:i+batch_size]
+        order_pipeline = [
+            {"$match": {
+                "appID": config['app_id'],
+                "user": {"$in": batch},
+                "updatedAt": {"$gte": start_utc, "$lt": end_utc},
+                "type": {"$in": ["pay", "withdrawal"]},
+                "status": "Completed",
+                "ignoreAnalysis": {"$ne": True}
+            }},
+            {"$group": {
+                "_id": {"user": "$user", "type": "$type"},
+                "amount": {"$sum": "$totalPrice"},
+                "count": {"$sum": 1}
+            }}
+        ]
+        order_results = list(db["orders"].aggregate(order_pipeline, allowDiskUse=True))
+        for res in order_results:
+            uid = res['_id']['user']
+            o_type = res['_id']['type']
+            if o_type == 'pay':
+                stats_map[uid]['pay_amt'] += res.get('amount', 0)
+                stats_map[uid]['pay_count'] += res.get('count', 0)
+            elif o_type == 'withdrawal':
+                stats_map[uid]['wd_amt'] += res.get('amount', 0)
+
+    print(f"[4/5] 正在拉取日报数据 (投注/奖励)...")
+    daily_map = {}
+    for i in range(0, len(sc_uids), batch_size):
+        batch = sc_uids[i:i+batch_size]
+        daily_pipeline = [
+            {"$match": {"user": {"$in": batch}, "startAt": {"$gte": start_utc, "$lt": end_utc}}},
+            {"$group": {"_id": "$user", "rewardCash": {"$sum": "$rewardCash"}, "betAmount": {"$sum": "$betAmount"}}}
+        ]
+        res_list = list(db["transactiondailies"].aggregate(daily_pipeline))
+        for r in res_list:
+            daily_map[r['_id']] = r
+
+    print(f"[5/5] 导出报表...")
+    headers = [
+        "uid", "注册手机号", "KYC手机号", "用户渠道", "注册日期", "首次充值日期", 
+        "第一笔充值金额", "区间内存款次数", "区间内总充值金额", "区间内提款金额", 
+        "区间内获得真金奖励", "区间内投注金额"
+    ]
+    with open(output_file, 'w', newline='', encoding='utf-8-sig') as f:
+        writer = csv.writer(f)
+        writer.writerow(headers)
+        rows_to_write = []
+        for uid, u in shoucun_users.items():
+            d = daily_map.get(uid, {})
+            st = stats_map.get(uid, {})
+            
+            raw_phone = u.get('phone', '') or ''
+            phone = f"\t{raw_phone}" if raw_phone else ""
+            raw_kyc = kyc_map.get(uid, "")
+            kyc_phone = f"\t{raw_kyc}" if raw_kyc else ""
+            
+            first_recharge_amt = u.get('meta', {}).get('firstRecharge', 0)
+            
+            rows_to_write.append([
+                u.get('uid', ''),
+                phone,
+                kyc_phone,
+                "广告" if u.get('meta', {}).get('adChannel') else "自然裂变",
+                safe_date_format(u.get('createdAt')), 
+                safe_date_format(u.get('meta', {}).get('firstRechargeAt')),
+                first_recharge_amt,
+                st['pay_count'],
+                st['pay_amt'],
+                st['wd_amt'],
+                d.get('rewardCash', 0), 
+                d.get('betAmount', 0)
+            ])
+        writer.writerows(rows_to_write)
+    print(f"✅ 完成: {os.path.abspath(output_file)}")
+
+
 def main():
     print("=" * 50)
     print(f"      运营数据自动化导出工具 v{VERSION}")
@@ -658,12 +737,13 @@ def main():
 
         print("\n--- 请选择要执行的功能 ---")
         print("[1] 导出 - 充提数据")
-        print("[2] 导出 - 首存订单 (支持指定最低金额并含手机号)")
+        print("[2] 导出 - 首存订单 (标准版)")
         print("[3] 打印 - 书生计算SMS召回情况 (支持 .csv / .xlsx)")
         print("[4] 导出 - 书生筛选注册未充值用户 (用于拉新/激活)")
         print("[5] 导出 - 查询指定条件用户群 (用于精准圈选)")
         print("[6] 导出 - 距上次充值超过X天的客户数据 (促活/召回)")
         print("[7] 打印 - 根据手机号码查询用户付费行为 (需本地txt)")
+        print("[8] 导出 - 精准首存高净值用户 (支持达标金额/带双手机号)")
         
         choice = input(">> ").strip()
 
@@ -697,7 +777,7 @@ def main():
         client = pymongo.MongoClient(
             config['mongo_uri'], 
             serverSelectionTimeoutMS=10000, 
-            socketTimeoutMS=60000, 
+            socketTimeoutMS=300000, 
             connectTimeoutMS=60000
         )
         client.admin.command('ping')
@@ -711,6 +791,7 @@ def main():
         elif choice == '5': run_report_5_custom_users(db, config, end_utc, end_date.strftime('%Y-%m-%d'))
         elif choice == '6': run_report_6_inactive_rechargers(db, config, end_utc, end_date.strftime('%Y-%m-%d'))
         elif choice == '7': run_report_7_phone_payment_behavior(db, config, start_utc, end_utc, date_str)
+        elif choice == '8': run_report_8_shoucun_pro(db, config, start_utc, end_utc, date_str)
         else: print("❌ 无效选择")
 
     except Exception as e:
