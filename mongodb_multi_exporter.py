@@ -6,13 +6,14 @@ import sys
 import os
 import traceback
 import json
+import time
 
 try:
     import openpyxl
 except ImportError:
     pass
 
-VERSION = "7.2.1-PhoneMatchPerf-Fix"
+VERSION = "7.3.0-ExactMatch"
 
 def get_base_path():
     if getattr(sys, 'frozen', False):
@@ -495,39 +496,47 @@ def run_report_7_phone_payment_behavior(db, config, start_utc, end_utc, date_str
         print("⚠️ 文件中没有找到任何有效的手机号。")
         return
         
-    print(f"✅ 成功读取了 {total_phones} 个去重后的手机号。正在优化格式并匹配系统用户...")
+    print(f"✅ 成功读取了 {total_phones} 个去重后的手机号。正在按照标准格式处理并匹配系统用户...")
     
-    # 智能剥离所有格式，提炼纯核心数字，补全所有变体
+    # 极致性能优化：严格按照 "+63-手机号" 格式拼接
     search_phones = set()
     for p in phone_set:
-        clean_p = p.replace(' ', '').replace('-', '').replace('+', '')
-        core = clean_p
-        if clean_p.startswith('630'): core = clean_p[3:]
-        elif clean_p.startswith('63'): core = clean_p[2:]
-        elif clean_p.startswith('0'): core = clean_p[1:]
-        
-        search_phones.update([
-            f"+63-{core}", f"+63{core}", f"63{core}", f"0{core}", core, p
-        ])
-        
+        # 去除可能存在的空格、加号、减号等杂质字符
+        clean_p = p.replace(' ', '').replace('+', '').replace('-', '')
+        if len(clean_p) > 2:
+            # 核心规则：前面加“+”，在第二位后面加“-”
+            formatted_p = f"+{clean_p[:2]}-{clean_p[2:]}"
+            search_phones.add(formatted_p)
+            
     search_phones_list = list(search_phones)
     matched_user_ids = []
     
-    # 【修复重点】：将每批次查询的数据量从 5000 下调到 1000，防止触发 MongoDB 强杀机制
-    batch_size = 1000
+    batch_size = 2000
     total_batches = (len(search_phones_list) + batch_size - 1) // batch_size
     print(f"   (正在 {total_batches} 个并行批次中极速比对，请稍候...)")
     
     for i in range(0, len(search_phones_list), batch_size):
         batch = search_phones_list[i:i+batch_size]
-        # 【修复重点】：直接 list() 获取，防止 cursor 超时
-        users = list(db["users"].find({"phone": {"$in": batch}}, {"_id": 1}))
-        matched_user_ids.extend([u['_id'] for u in users])
         
-        # 每隔一定批次打印进度
+        # 加入防弹衣：断线自动重连机制
+        for attempt in range(3):
+            try:
+                users = list(db["users"].find({"phone": {"$in": batch}}, {"_id": 1}))
+                matched_user_ids.extend([u['_id'] for u in users])
+                break
+            except pymongo.errors.AutoReconnect:
+                if attempt < 2:
+                    print(f"\n     ⚠️ 检测到数据库连接闪断，冷静等待 2 秒后自动重试 (批次 {i//batch_size + 1})...")
+                    time.sleep(2)
+                else:
+                    raise  # 如果重试了 3 次还是断线，只能放弃
+        
+        # 强制微秒级休眠，给数据库 CPU 留出呼吸时间，防止被防火墙切断
+        time.sleep(0.02)
+        
         current_batch = i // batch_size + 1
-        if current_batch % 50 == 0:
-            print(f"     已比对完成 {current_batch} / {total_batches} 批次...")
+        if current_batch % 20 == 0:
+            print(f"     已完成 {current_batch} / {total_batches} 批次比对...")
             
     matched_user_ids = list(set(matched_user_ids))
         
@@ -541,7 +550,6 @@ def run_report_7_phone_payment_behavior(db, config, start_utc, end_utc, date_str
     paying_users_count = 0
     total_paid_amount = 0
     
-    # 【修复重点】：订单表查询步长下调到 2000
     uid_batch_size = 2000
     total_order_batches = (matched_count + uid_batch_size - 1) // uid_batch_size
     
@@ -562,13 +570,25 @@ def run_report_7_phone_payment_behavior(db, config, start_utc, end_utc, date_str
             }}
         ]
         
-        pay_results = list(db["orders"].aggregate(pay_pipeline, allowDiskUse=True))
-        paying_users_count += len(pay_results)
-        total_paid_amount += sum(res.get('totalAmount', 0) for res in pay_results)
+        # 订单查询也加入防弹衣
+        for attempt in range(3):
+            try:
+                pay_results = list(db["orders"].aggregate(pay_pipeline, allowDiskUse=True))
+                paying_users_count += len(pay_results)
+                total_paid_amount += sum(res.get('totalAmount', 0) for res in pay_results)
+                break
+            except pymongo.errors.AutoReconnect:
+                if attempt < 2:
+                    print(f"\n     ⚠️ 订单查询被阻断，冷静等待 2 秒后自动重试...")
+                    time.sleep(2)
+                else:
+                    raise
+                    
+        time.sleep(0.02) # 同样给数据库呼吸时间
         
         current_order_batch = i // uid_batch_size + 1
         if total_order_batches > 1 and current_order_batch % 5 == 0:
-            print(f"     订单查询进度 {current_order_batch} / {total_order_batches} ...")
+            print(f"     订单拉取进度 {current_order_batch} / {total_order_batches} ...")
     
     print("\n" + "🌟"*25)
     print(f"  📊 手机号渠道转化质量分析 ({date_str})")
@@ -639,8 +659,14 @@ def main():
         else:
             print(f"\n⏳ 统计时间范围 (北京时间): {start_date.strftime('%Y-%m-%d 00:00:00')} -> {end_date.strftime('%Y-%m-%d 23:59:59')}")
 
+        # 给客户端加上超时配置护甲
         print("\n正在连接 MongoDB...")
-        client = pymongo.MongoClient(config['mongo_uri'], serverSelectionTimeoutMS=5000)
+        client = pymongo.MongoClient(
+            config['mongo_uri'], 
+            serverSelectionTimeoutMS=10000, 
+            socketTimeoutMS=60000, 
+            connectTimeoutMS=60000
+        )
         client.admin.command('ping')
         db = client[config['db_name']]
         print("✅ MongoDB 连接成功")
