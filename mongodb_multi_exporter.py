@@ -13,7 +13,7 @@ try:
 except ImportError:
     pass
 
-VERSION = "8.0.0-EightToolsComplete"
+VERSION = "9.0.0-NineToolsComplete"
 
 def get_base_path():
     if getattr(sys, 'frozen', False):
@@ -134,7 +134,6 @@ def run_report_1_chongti(db, config, start_utc, end_utc, date_str):
     print(f"✅ 完成: {os.path.abspath(output_file)}")
 
 def run_report_2_shoucun(db, config, start_utc, end_utc, date_str):
-    """【恢复版本】原汁原味的普通首存报表"""
     output_file = os.path.join(BASE_DIR, f"首存订单_{config['db_name']}_{date_str}.csv")
     print(f"\n[1/4] 正在统计该时间段所有充值用户 ({date_str})...")
     
@@ -606,7 +605,6 @@ def run_report_7_phone_payment_behavior(db, config, start_utc, end_utc, date_str
 
 
 def run_report_8_shoucun_pro(db, config, start_utc, end_utc, date_str):
-    """【新增版本】光速精准查询：支持最低金额、KYC手机号、注册手机号"""
     output_file = os.path.join(BASE_DIR, f"首存达标用户_{config['db_name']}_{date_str}.csv")
     
     print("\n" + "="*40)
@@ -722,6 +720,93 @@ def run_report_8_shoucun_pro(db, config, start_utc, end_utc, date_str):
     print(f"✅ 完成: {os.path.abspath(output_file)}")
 
 
+def run_report_9_registered_users(db, config, start_utc, end_utc, date_str):
+    """【新增】导出某段时间内注册的用户数据"""
+    output_file = os.path.join(BASE_DIR, f"新注册用户_{config['db_name']}_{date_str}.csv")
+    print(f"\n[1/3] 正在筛选 {date_str} 期间注册的用户...")
+
+    # 根据注册时间 createdAt 进行筛选
+    query = {
+        "role": {"$ne": "gm"},
+        "createdAt": {"$gte": start_utc, "$lt": end_utc}
+    }
+
+    # 仅提取需要的关键字段，提升查询性能
+    projection = {
+        "_id": 1, "uid": 1, "phone": 1, "email": 1, "createdAt": 1,
+        "rechargeCount": 1, "rechargeCash": 1,
+        "withdrawCompletedCount": 1, "withdrawCount": 1,
+        "withdrawCompletedCash": 1, "withdrawCash": 1,
+        "latestLoginAt": 1
+    }
+
+    cursor = db["users"].find(query, projection, batch_size=5000)
+
+    print(f"[2/3] 正在匹配 KYC 认证数据并生成导出文件...")
+
+    count = 0
+    batch_size = 5000
+    docs_cache = []
+    user_ids_cache = []
+
+    with open(output_file, 'w', newline='', encoding='utf-8-sig') as f:
+        writer = csv.writer(f)
+        writer.writerow([
+            "注册时间(东八区)", "uid", "注册手机号", "邮箱", "KYC手机号",
+            "累计充值次数", "累计充值金额", "累计提现完成次数", "累计提现完成金额",
+            "最后登录时间(东八区)"
+        ])
+
+        def process_and_write_batch(users, uids):
+            wallets = db["wallets"].find({"user": {"$in": uids}}, {"user": 1, "banks": 1})
+            kyc_map = {}
+            for w in wallets:
+                banks = w.get("banks", [])
+                if banks and isinstance(banks, list) and len(banks) > 0:
+                    kyc_map[w["user"]] = banks[0].get("phone", "")
+
+            rows = []
+            for u in users:
+                raw_phone = u.get('phone', '') or ''
+                phone = f"\t{raw_phone}" if raw_phone else ""
+                
+                raw_kyc = kyc_map.get(u['_id'], "")
+                kyc_phone = f"\t{raw_kyc}" if raw_kyc else ""
+
+                # 提现数据优先取 Completed 字段，如果没有则降级取常规字段
+                wd_cash = u.get('withdrawCompletedCash', u.get('withdrawCash', 0))
+                wd_count = u.get('withdrawCompletedCount', u.get('withdrawCount', 0))
+
+                rows.append([
+                    safe_date_format(u.get('createdAt')),
+                    u.get('uid', ''),
+                    phone,
+                    u.get('email', '') or '',
+                    kyc_phone,
+                    u.get('rechargeCount', 0),
+                    u.get('rechargeCash', 0),
+                    wd_count,
+                    wd_cash,
+                    safe_date_format(u.get('latestLoginAt'))
+                ])
+            writer.writerows(rows)
+
+        for doc in cursor:
+            docs_cache.append(doc)
+            user_ids_cache.append(doc['_id'])
+            count += 1
+            if len(docs_cache) >= batch_size:
+                process_and_write_batch(docs_cache, user_ids_cache)
+                docs_cache.clear()
+                user_ids_cache.clear()
+                print(f"  已处理并导出 {count} 条新注册用户数据...")
+
+        if docs_cache:
+            process_and_write_batch(docs_cache, user_ids_cache)
+
+    print(f"[3/3] ✅ 导出成功！共计圈选出 {count} 名注册用户。\n文件位置: {os.path.abspath(output_file)}")
+
+
 def main():
     print("=" * 50)
     print(f"      运营数据自动化导出工具 v{VERSION}")
@@ -744,6 +829,7 @@ def main():
         print("[6] 导出 - 距上次充值超过X天的客户数据 (促活/召回)")
         print("[7] 打印 - 根据手机号码查询用户付费行为 (需本地txt)")
         print("[8] 导出 - 精准首存高净值用户 (支持达标金额/带双手机号)")
+        print("[9] 导出 - 某段时间内注册的用户数据 (含KYC/充提统计)")
         
         choice = input(">> ").strip()
 
@@ -792,6 +878,7 @@ def main():
         elif choice == '6': run_report_6_inactive_rechargers(db, config, end_utc, end_date.strftime('%Y-%m-%d'))
         elif choice == '7': run_report_7_phone_payment_behavior(db, config, start_utc, end_utc, date_str)
         elif choice == '8': run_report_8_shoucun_pro(db, config, start_utc, end_utc, date_str)
+        elif choice == '9': run_report_9_registered_users(db, config, start_utc, end_utc, date_str)
         else: print("❌ 无效选择")
 
     except Exception as e:
