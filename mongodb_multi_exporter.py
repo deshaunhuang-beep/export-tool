@@ -13,7 +13,7 @@ try:
 except ImportError:
     pass
 
-VERSION = "9.0.0-NineToolsComplete"
+VERSION = "9.1.0-AppID-Isolation"
 
 def get_base_path():
     if getattr(sys, 'frozen', False):
@@ -106,7 +106,7 @@ def run_report_1_chongti(db, config, start_utc, end_utc, date_str):
 
     uids = [res['_id']['user'] for res in order_results]
     print(f"[2/4] 同步 {len(uids)} 个用户...")
-    user_map = {u['_id']: u for u in db["users"].find({"_id": {"$in": uids}}, {"uid": 1, "meta.adChannel": 1, "createdAt": 1})}
+    user_map = {u['_id']: u for u in db["users"].find({"appID": config['app_id'], "_id": {"$in": uids}}, {"uid": 1, "meta.adChannel": 1, "createdAt": 1})}
     
     daily_pipeline = [
         {"$match": {"user": {"$in": uids}, "startAt": {"$gte": start_utc, "$lt": end_utc}}},
@@ -148,6 +148,7 @@ def run_report_2_shoucun(db, config, start_utc, end_utc, date_str):
     
     print(f"[2/4] 正在筛选在这几天内产生首次充值的用户...")
     shoucun_users = {u['_id']: u for u in db["users"].find({
+        "appID": config['app_id'],
         "_id": {"$in": uids},
         "meta.firstRechargeAt": {"$gte": start_utc, "$lt": end_utc}
     }, {"uid": 1, "meta.adChannel": 1, "meta.firstRechargeAt": 1, "createdAt": 1})}
@@ -228,7 +229,7 @@ def run_report_3_sms_recall(db, config, start_utc, end_utc, date_str):
     print(f"✅ 成功从 {ext.upper()} 载入 {len(target_uids)} 个有效 UID。正在分析...")
 
     pipeline = [
-        {"$match": {"uid": {"$in": target_uids}}},
+        {"$match": {"appID": config['app_id'], "uid": {"$in": target_uids}}},
         {"$group": {
             "_id": None, "totalUsers": {"$sum": 1},
             "activeUsers": {"$sum": {"$cond": [{"$and": [{"$gte": ["$updatedAt", start_utc]}, {"$lt": ["$updatedAt", end_utc]}]}, 1, 0]}},
@@ -249,7 +250,8 @@ def run_report_4_unrecharged_users(db, config, end_utc, end_date_str):
     output_file = os.path.join(BASE_DIR, f"注册未充值用户_{config['db_name']}_{end_date_str}.csv")
     print(f"\n[1/2] 正在筛选注册未充值用户 (截止到 {end_date_str} 23:59:59)...")
 
-    query = {"role": {"$ne": "gm"}, "rechargeCount": 0, "updatedAt": {"$lt": end_utc}}
+    # 💡 修复点：加入 appID 隔离限制
+    query = {"appID": config['app_id'], "role": {"$ne": "gm"}, "rechargeCount": 0, "updatedAt": {"$lt": end_utc}}
     projection = {"_id": 0, "uid": 1, "phone": 1, "email": 1, "updatedAt": 1}
     cursor = db["users"].find(query, projection, batch_size=5000)
 
@@ -306,7 +308,9 @@ def run_report_5_custom_users(db, config, end_utc, end_date_str):
     print(f"      - 账户余额: {bal_min} 至 {bal_max} 元")
     print(f"      - 离线天数: {off_min} 至 {off_max} 天 (最后登录晚于 {min_login_time.strftime('%Y-%m-%d')} 且早于 {max_login_time.strftime('%Y-%m-%d')})")
 
+    # 💡 修复点：加入 appID 隔离限制
     query = {
+        "appID": config['app_id'],
         "role": {"$ne": "gm"},
         "rechargeCount": {"$gte": rc_min, "$lte": rc_max},
         "rechargeCash": {"$gte": cash_min, "$lte": cash_max},
@@ -377,7 +381,9 @@ def run_report_6_inactive_rechargers(db, config, end_utc, date_str):
     print(f"\n[1/3] 正在筛选距上次充值超过 {days} 天的用户...")
     print(f"      (最后充值时间早于东八区: {(target_date + timedelta(hours=8)).strftime('%Y-%m-%d %H:%M:%S')})")
 
+    # 💡 修复点：加入 appID 隔离限制
     query = {
+        "appID": config['app_id'],
         "role": {"$ne": "gm"},
         "rechargeCount": {"$gt": 0},
         "$or": [
@@ -517,7 +523,8 @@ def run_report_7_phone_payment_behavior(db, config, start_utc, end_utc, date_str
         
         for attempt in range(3):
             try:
-                users = list(db["users"].find({"phone": {"$in": batch}}, {"_id": 1}))
+                # 💡 修复点：反查手机号用户时加入 appID 限制，避免混淆多端用户
+                users = list(db["users"].find({"appID": config['app_id'], "phone": {"$in": batch}}, {"_id": 1}))
                 matched_user_ids.extend([u['_id'] for u in users])
                 break
             except pymongo.errors.AutoReconnect:
@@ -613,7 +620,9 @@ def run_report_8_shoucun_pro(db, config, start_utc, end_utc, date_str):
     
     print(f"\n[1/5] 正在从用户表极速筛选该时间段的首充用户...")
     
+    # 💡 修复点：加入 appID 隔离限制
     user_query = {
+        "appID": config['app_id'],
         "meta.firstRechargeAt": {"$gte": start_utc, "$lt": end_utc}
     }
     if min_amount > 0:
@@ -721,17 +730,17 @@ def run_report_8_shoucun_pro(db, config, start_utc, end_utc, date_str):
 
 
 def run_report_9_registered_users(db, config, start_utc, end_utc, date_str):
-    """【新增】导出某段时间内注册的用户数据"""
+    """导出某段时间内注册的用户数据"""
     output_file = os.path.join(BASE_DIR, f"新注册用户_{config['db_name']}_{date_str}.csv")
     print(f"\n[1/3] 正在筛选 {date_str} 期间注册的用户...")
 
-    # 根据注册时间 createdAt 进行筛选
+    # 💡 修复点：加入 appID 隔离限制，实现跨渠道精准分流导出
     query = {
+        "appID": config['app_id'],
         "role": {"$ne": "gm"},
         "createdAt": {"$gte": start_utc, "$lt": end_utc}
     }
 
-    # 仅提取需要的关键字段，提升查询性能
     projection = {
         "_id": 1, "uid": 1, "phone": 1, "email": 1, "createdAt": 1,
         "rechargeCount": 1, "rechargeCash": 1,
@@ -773,7 +782,6 @@ def run_report_9_registered_users(db, config, start_utc, end_utc, date_str):
                 raw_kyc = kyc_map.get(u['_id'], "")
                 kyc_phone = f"\t{raw_kyc}" if raw_kyc else ""
 
-                # 提现数据优先取 Completed 字段，如果没有则降级取常规字段
                 wd_cash = u.get('withdrawCompletedCash', u.get('withdrawCash', 0))
                 wd_count = u.get('withdrawCompletedCount', u.get('withdrawCount', 0))
 
@@ -829,7 +837,7 @@ def main():
         print("[6] 导出 - 距上次充值超过X天的客户数据 (促活/召回)")
         print("[7] 打印 - 根据手机号码查询用户付费行为 (需本地txt)")
         print("[8] 导出 - 精准首存高净值用户 (支持达标金额/带双手机号)")
-        print("[9] 导出 - 某段时间内注册的用户数据 (含KYC/充提统计)")
+        print("[9] 导出 - 某段时间内注册的用户 data (含KYC/充提统计)")
         
         choice = input(">> ").strip()
 
