@@ -13,7 +13,7 @@ try:
 except ImportError:
     pass
 
-VERSION = "9.1.0-AppID-Isolation"
+VERSION = "9.2.0-Mixed-Inactive-Support"
 
 def get_base_path():
     if getattr(sys, 'frozen', False):
@@ -81,7 +81,7 @@ def get_int_input(prompt_text, default_val):
     try:
         return int(val)
     except ValueError:
-        print(f"   ⚠️ 输入无效，自动使用默认值: {default_val}")
+        print(f"    ⚠️ 输入无效，自动使用默认值: {default_val}")
         return default_val
 
 def run_report_1_chongti(db, config, start_utc, end_utc, date_str):
@@ -250,7 +250,6 @@ def run_report_4_unrecharged_users(db, config, end_utc, end_date_str):
     output_file = os.path.join(BASE_DIR, f"注册未充值用户_{config['db_name']}_{end_date_str}.csv")
     print(f"\n[1/2] 正在筛选注册未充值用户 (截止到 {end_date_str} 23:59:59)...")
 
-    # 💡 修复点：加入 appID 隔离限制
     query = {"appID": config['app_id'], "role": {"$ne": "gm"}, "rechargeCount": 0, "updatedAt": {"$lt": end_utc}}
     projection = {"_id": 0, "uid": 1, "phone": 1, "email": 1, "updatedAt": 1}
     cursor = db["users"].find(query, projection, batch_size=5000)
@@ -308,7 +307,6 @@ def run_report_5_custom_users(db, config, end_utc, end_date_str):
     print(f"      - 账户余额: {bal_min} 至 {bal_max} 元")
     print(f"      - 离线天数: {off_min} 至 {off_max} 天 (最后登录晚于 {min_login_time.strftime('%Y-%m-%d')} 且早于 {max_login_time.strftime('%Y-%m-%d')})")
 
-    # 💡 修复点：加入 appID 隔离限制
     query = {
         "appID": config['app_id'],
         "role": {"$ne": "gm"},
@@ -381,7 +379,6 @@ def run_report_6_inactive_rechargers(db, config, end_utc, date_str):
     print(f"\n[1/3] 正在筛选距上次充值超过 {days} 天的用户...")
     print(f"      (最后充值时间早于东八区: {(target_date + timedelta(hours=8)).strftime('%Y-%m-%d %H:%M:%S')})")
 
-    # 💡 修复点：加入 appID 隔离限制
     query = {
         "appID": config['app_id'],
         "role": {"$ne": "gm"},
@@ -523,13 +520,12 @@ def run_report_7_phone_payment_behavior(db, config, start_utc, end_utc, date_str
         
         for attempt in range(3):
             try:
-                # 💡 修复点：反查手机号用户时加入 appID 限制，避免混淆多端用户
                 users = list(db["users"].find({"appID": config['app_id'], "phone": {"$in": batch}}, {"_id": 1}))
                 matched_user_ids.extend([u['_id'] for u in users])
                 break
             except pymongo.errors.AutoReconnect:
                 if attempt < 2:
-                    print(f"\n     ⚠️ 检测到数据库连接闪断，冷静等待 2 秒后自动重试 (批次 {i//batch_size + 1})...")
+                    print(f"\n      ⚠️ 检测到数据库连接闪断，冷静等待 2 秒后自动重试 (批次 {i//batch_size + 1})...")
                     time.sleep(2)
                 else:
                     raise
@@ -580,7 +576,7 @@ def run_report_7_phone_payment_behavior(db, config, start_utc, end_utc, date_str
                 break
             except pymongo.errors.AutoReconnect:
                 if attempt < 2:
-                    print(f"\n     ⚠️ 订单查询被阻断，冷静等待 2 秒后自动重试...")
+                    print(f"\n      ⚠️ 订单查询被阻断，冷静等待 2 秒后自动重试...")
                     time.sleep(2)
                 else:
                     raise
@@ -592,7 +588,7 @@ def run_report_7_phone_payment_behavior(db, config, start_utc, end_utc, date_str
             print(f"     订单拉取进度 {current_order_batch} / {total_order_batches} ...")
     
     print("\n" + "🌟"*25)
-    print(f"  📊 手机号渠道转化质量分析 ({date_str})")
+    print(f"   📊 手机号渠道转化质量分析 ({date_str})")
     print("🌟"*25)
     print(f"🔹 1. 文件提取手机号总数 : {total_phones:,} 个")
     print(f"🔹 2. 成功定位系统用户数 : {matched_count:,} 人")
@@ -620,7 +616,6 @@ def run_report_8_shoucun_pro(db, config, start_utc, end_utc, date_str):
     
     print(f"\n[1/5] 正在从用户表极速筛选该时间段的首充用户...")
     
-    # 💡 修复点：加入 appID 隔离限制
     user_query = {
         "appID": config['app_id'],
         "meta.firstRechargeAt": {"$gte": start_utc, "$lt": end_utc}
@@ -734,7 +729,6 @@ def run_report_9_registered_users(db, config, start_utc, end_utc, date_str):
     output_file = os.path.join(BASE_DIR, f"新注册用户_{config['db_name']}_{date_str}.csv")
     print(f"\n[1/3] 正在筛选 {date_str} 期间注册的用户...")
 
-    # 💡 修复点：加入 appID 隔离限制，实现跨渠道精准分流导出
     query = {
         "appID": config['app_id'],
         "role": {"$ne": "gm"},
@@ -815,6 +809,87 @@ def run_report_9_registered_users(db, config, start_utc, end_utc, date_str):
     print(f"[3/3] ✅ 导出成功！共计圈选出 {count} 名注册用户。\n文件位置: {os.path.abspath(output_file)}")
 
 
+def run_report_10_mixed_inactive_users(db, config, start_utc, end_utc, date_str):
+    """【新需求】导出指定注册时间内：1. 注册未充值用户；2. 仅充值一次未复充的用户 (含双手机号)"""
+    output_file = os.path.join(BASE_DIR, f"未充及单充未复充用户_{config['db_name']}_{date_str}.csv")
+    print(f"\n[1/3] 正在筛选 {date_str} 期间注册，且 (从未充值 或 仅充值一次) 的用户...")
+
+    query = {
+        "appID": config['app_id'],
+        "role": {"$ne": "gm"},
+        "createdAt": {"$gte": start_utc, "$lt": end_utc},
+        "rechargeCount": {"$in": [0, 1]}
+    }
+
+    projection = {
+        "_id": 1, "uid": 1, "phone": 1, "email": 1, "createdAt": 1,
+        "rechargeCount": 1, "rechargeCash": 1, "latestLoginAt": 1
+    }
+
+    cursor = db["users"].find(query, projection, batch_size=5000)
+
+    print(f"[2/3] 正在匹配 KYC 钱包数据并生成导出文件...")
+
+    count = 0
+    batch_size = 5000
+    docs_cache = []
+    user_ids_cache = []
+
+    with open(output_file, 'w', newline='', encoding='utf-8-sig') as f:
+        writer = csv.writer(f)
+        writer.writerow([
+            "uid", "注册手机号", "KYC绑定手机号", "邮箱", "注册时间(东八区)", 
+            "充值次数", "累计充值金额", "最后登录时间(东八区)", "用户分类"
+        ])
+
+        def process_and_write_batch(users, uids):
+            wallets = db["wallets"].find({"user": {"$in": uids}}, {"user": 1, "banks": 1})
+            kyc_map = {}
+            for w in wallets:
+                banks = w.get("banks", [])
+                if banks and isinstance(banks, list) and len(banks) > 0:
+                    kyc_map[w["user"]] = banks[0].get("phone", "")
+
+            rows = []
+            for u in users:
+                raw_phone = u.get('phone', '') or ''
+                phone = f"\t{raw_phone}" if raw_phone else ""
+                
+                raw_kyc = kyc_map.get(u['_id'], "")
+                kyc_phone = f"\t{raw_kyc}" if raw_kyc else ""
+
+                r_count = u.get('rechargeCount', 0)
+                user_type = "注册未充值" if r_count == 0 else "仅单充未复充"
+
+                rows.append([
+                    u.get('uid', ''),
+                    phone,
+                    kyc_phone,
+                    u.get('email', '') or '',
+                    safe_date_format(u.get('createdAt')),
+                    r_count,
+                    u.get('rechargeCash', 0),
+                    safe_date_format(u.get('latestLoginAt')),
+                    user_type
+                ])
+            writer.writerows(rows)
+
+        for doc in cursor:
+            docs_cache.append(doc)
+            user_ids_cache.append(doc['_id'])
+            count += 1
+            if len(docs_cache) >= batch_size:
+                process_and_write_batch(docs_cache, user_ids_cache)
+                docs_cache.clear()
+                user_ids_cache.clear()
+                print(f"  已处理并导出 {count} 条目标用户数据...")
+
+        if docs_cache:
+            process_and_write_batch(docs_cache, user_ids_cache)
+
+    print(f"[3/3] ✅ 导出成功！共计圈选出 {count} 名目标用户。\n文件位置: {os.path.abspath(output_file)}")
+
+
 def main():
     print("=" * 50)
     print(f"      运营数据自动化导出工具 v{VERSION}")
@@ -838,6 +913,7 @@ def main():
         print("[7] 打印 - 根据手机号码查询用户付费行为 (需本地txt)")
         print("[8] 导出 - 精准首存高净值用户 (支持达标金额/带双手机号)")
         print("[9] 导出 - 某段时间内注册的用户 data (含KYC/充提统计)")
+        print("[10] 导出 - 某期间注册未充及单充未复充用户 (拉新/精准留存) 🌟")
         
         choice = input(">> ").strip()
 
@@ -887,6 +963,7 @@ def main():
         elif choice == '7': run_report_7_phone_payment_behavior(db, config, start_utc, end_utc, date_str)
         elif choice == '8': run_report_8_shoucun_pro(db, config, start_utc, end_utc, date_str)
         elif choice == '9': run_report_9_registered_users(db, config, start_utc, end_utc, date_str)
+        elif choice == '10': run_report_10_mixed_inactive_users(db, config, start_utc, end_utc, date_str)
         else: print("❌ 无效选择")
 
     except Exception as e:
